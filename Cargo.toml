@@ -1,0 +1,13 @@
+[package]
+name = "bitask"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bitask"
+
+[dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.26", features = ["derive"] }
+env_logger = "0.11.6"
+log = "0.4.25"
