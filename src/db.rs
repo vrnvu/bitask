@@ -1,8 +1,9 @@
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Cursor, Read, Write},
+    io::{BufReader, BufWriter, Cursor, Read, Write},
     path::Path,
-}; // Add this import
+};
 
 use fs2::FileExt;
 
@@ -22,7 +23,16 @@ pub enum Error {
 /// The locking is handled at the OS level through file system locks.
 pub struct Bitask {
     file_lock: File,
-    active_file: BufReader<File>,
+    writer: BufWriter<File>,
+    readers: HashMap<u32, BufReader<File>>,
+    keydir: HashMap<Vec<u8>, KeyDirEntry>,
+}
+
+struct KeyDirEntry {
+    file_id: u32,
+    value_size: u32,
+    value_position: u64,
+    timestamp: u64,
 }
 
 impl Bitask {
@@ -54,7 +64,9 @@ impl Bitask {
 
         Ok(Self {
             file_lock: lock_file,
-            active_file: BufReader::new(active_file),
+            writer: BufWriter::new(active_file),
+            readers: HashMap::new(),
+            keydir: HashMap::new(),
         })
     }
 
@@ -73,16 +85,16 @@ enum Command {
     /// Append a key-value pair.
     /// value_size must be greater than 0.
     Set {
-        timestamp: u64,
         crc: u32,
+        timestamp: u32,
         key: Vec<u8>,
         value: Vec<u8>,
     },
     /// Remove a key.
     /// If value_size is 0, the key is removed from the keydir.
     Remove {
-        timestamp: u64,
         crc: u32,
+        timestamp: u32,
         key: Vec<u8>,
         value: Vec<u8>,
     },
@@ -94,7 +106,9 @@ impl Command {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_secs()
+            .try_into()
+            .unwrap();
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
@@ -102,8 +116,8 @@ impl Command {
         let crc = hasher.finalize();
 
         Self::Set {
-            timestamp,
             crc,
+            timestamp,
             key,
             value,
         }
@@ -114,15 +128,17 @@ impl Command {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_secs()
+            .try_into()
+            .unwrap();
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
         let crc = hasher.finalize();
 
         Self::Remove {
-            timestamp,
             crc,
+            timestamp,
             key,
             value: vec![],
         }
@@ -132,13 +148,13 @@ impl Command {
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         match self {
             Self::Set {
-                timestamp,
                 crc,
+                timestamp,
                 key,
                 value,
             } => {
-                buffer.write_all(&timestamp.to_le_bytes())?;
                 buffer.write_all(&crc.to_le_bytes())?;
+                buffer.write_all(&timestamp.to_le_bytes())?;
                 buffer.write_all(&(key.len() as u32).to_le_bytes())?;
                 buffer.write_all(&(value.len() as u32).to_le_bytes())?;
                 buffer.write_all(key.as_slice())?;
@@ -150,8 +166,8 @@ impl Command {
                 key,
                 value,
             } => {
-                buffer.write_all(&timestamp.to_le_bytes())?;
                 buffer.write_all(&crc.to_le_bytes())?;
+                buffer.write_all(&timestamp.to_le_bytes())?;
                 buffer.write_all(&(key.len() as u32).to_le_bytes())?;
                 buffer.write_all(&(value.len() as u32).to_le_bytes())?;
                 buffer.write_all(key.as_slice())?;
@@ -165,13 +181,13 @@ impl Command {
     fn deserialize(buf: &[u8]) -> Result<Self, Error> {
         let mut reader = Cursor::new(buf);
 
-        let mut timestamp_buffer = [0u8; 8];
-        reader.read_exact(&mut timestamp_buffer)?;
-        let timestamp = u64::from_le_bytes(timestamp_buffer);
-
         let mut crc_buffer = [0u8; 4];
         reader.read_exact(&mut crc_buffer)?;
         let crc = u32::from_le_bytes(crc_buffer);
+
+        let mut timestamp_buffer = [0u8; 4];
+        reader.read_exact(&mut timestamp_buffer)?;
+        let timestamp = u32::from_le_bytes(timestamp_buffer);
 
         let mut key_buffer = [0u8; 4];
         reader.read_exact(&mut key_buffer)?;
@@ -215,8 +231,8 @@ mod tests {
 
         // Extract original values before serialization
         let Command::Set {
-            timestamp,
             crc,
+            timestamp,
             ref key,
             ref value,
         } = command
@@ -232,13 +248,13 @@ mod tests {
         // Compare with deserialized
         match deserialized {
             Command::Set {
-                timestamp: ts2,
                 crc: crc2,
+                timestamp: ts2,
                 key: key2,
                 value: value2,
             } => {
-                assert_eq!(timestamp, ts2);
                 assert_eq!(crc, crc2);
+                assert_eq!(timestamp, ts2);
                 assert_eq!(*key, key2);
                 assert_eq!(*value, value2);
 
@@ -258,8 +274,8 @@ mod tests {
 
         // Extract original values
         let Command::Remove {
-            timestamp,
             crc,
+            timestamp,
             ref key,
             ref value,
         } = command
@@ -275,13 +291,13 @@ mod tests {
         // Compare with deserialized
         match deserialized {
             Command::Remove {
-                timestamp: ts2,
                 crc: crc2,
+                timestamp: ts2,
                 key: key2,
                 value: value2,
             } => {
-                assert_eq!(timestamp, ts2);
                 assert_eq!(crc, crc2);
+                assert_eq!(timestamp, ts2);
                 assert_eq!(*key, key2);
                 assert_eq!(*value, value2);
 
