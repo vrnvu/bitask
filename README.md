@@ -44,9 +44,18 @@ bitask put --key my_key --value my_value
 
 ```rust
 use bitask::Bitask;
+use std::path::Path;
 
-let bitask = Bitask::open(dir);
-bitask.put("my_key", "my_value");
-let value = bitask.ask("my_key");
-assert_eq!(value, "my_value");
+// Open database with exclusive access for writing
+let mut writer = Bitask::exclusive("./db")?;
+
+// Open database with shared access for reading
+let reader = Bitask::shared("./db")?;
+
+// Multiple readers can exist simultaneously
+let another_reader = Bitask::shared("./db")?;
+
+// But only one writer can exist at a time
+let another_writer = Bitask::exclusive("./db");
+assert_eq!(another_writer.is_err(), true);
 ```
