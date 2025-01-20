@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Cursor, Read, Write},
-    path::Path,
+    io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
 };
 
 use fs2::FileExt;
@@ -15,6 +15,12 @@ pub enum Error {
     WriterLock,
     #[error("Key not found")]
     KeyNotFound,
+    #[error("File {0} not found")]
+    FileNotFound(String),
+    #[error("Value size must be greater than 0")]
+    InvalidEmptyValue,
+    #[error("Key size must be greater than 0")]
+    InvalidEmptyKey,
 }
 
 /// A Bitask database.
@@ -22,10 +28,11 @@ pub enum Error {
 /// Only one instance can have write access at a time across all processes and threads.
 /// The locking is handled at the OS level through file system locks.
 pub struct Bitask {
+    path: PathBuf,
     file_lock: File,
     writer: BufWriter<File>,
     readers: HashMap<u32, BufReader<File>>,
-    keydir: HashMap<Vec<u8>, KeyDirEntry>,
+    keydir: BTreeMap<Vec<u8>, KeyDirEntry>,
 }
 
 struct KeyDirEntry {
@@ -63,19 +70,89 @@ impl Bitask {
             .open(path.as_ref().join("0.log"))?;
 
         Ok(Self {
+            path: path.as_ref().to_path_buf(),
             file_lock: lock_file,
             writer: BufWriter::new(active_file),
             readers: HashMap::new(),
-            keydir: HashMap::new(),
+            keydir: BTreeMap::new(),
         })
     }
 
-    pub fn ask(&self, _key: String) -> Result<String, Error> {
-        Err(Error::KeyNotFound)
+    pub fn ask(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
+        if key.is_empty() {
+            return Err(Error::InvalidEmptyKey);
+        }
+
+        if let Some(entry) = self.keydir.get(key) {
+            if !self.readers.contains_key(&entry.file_id) {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .open(self.path.join(format!("{}.log", entry.file_id)))?;
+                self.readers.insert(entry.file_id, BufReader::new(file));
+            }
+
+            let reader = self
+                .readers
+                .get_mut(&entry.file_id)
+                .ok_or(Error::FileNotFound(format!("{}.log", entry.file_id)))?;
+
+            reader.seek(SeekFrom::Start(entry.value_position))?;
+            // TODO buffer pool
+            let mut value = vec![0u8; entry.value_size as usize];
+            reader.read_exact(&mut value)?;
+            return Ok(value);
+        }
+
+        return Err(Error::KeyNotFound);
     }
 
-    pub fn put(&mut self, _key: String, _value: String) -> Result<(), Error> {
-        unimplemented!();
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
+        if key.is_empty() {
+            return Err(Error::InvalidEmptyKey);
+        }
+
+        if value.is_empty() {
+            return Err(Error::InvalidEmptyValue);
+        }
+
+        let command = Command::set(key.clone(), value.clone());
+        // TODO buffer pool
+        let mut buffer = Vec::new();
+        command.serialize(&mut buffer)?;
+
+        // TODO optimize writer to store last offset/position
+        let position = self.writer.seek(SeekFrom::End(0))?;
+        self.writer.write_all(&buffer)?;
+        self.writer.flush()?;
+
+        // 4(crc) + 4(timestamp) + 4(keylen) + 4(valuelen) + keylen
+        let value_position = position + 16 + key.len() as u64;
+        self.keydir.insert(
+            key,
+            KeyDirEntry {
+                file_id: 0,
+                value_size: value.len() as u32,
+                value_position,
+                timestamp: 0,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn remove(&mut self, key: Vec<u8>) -> Result<(), Error> {
+        if key.is_empty() {
+            return Err(Error::InvalidEmptyKey);
+        }
+
+        let command = Command::remove(key.clone());
+        let mut buffer = Vec::new();
+        command.serialize(&mut buffer)?;
+
+        self.writer.write_all(&buffer)?;
+        self.writer.flush()?;
+
+        self.keydir.remove(&key);
+        Ok(())
     }
 }
 
