@@ -9,6 +9,7 @@ name = "bitask"
 [dependencies]
 anyhow = "1.0.95"
 clap = { version = "4.5.26", features = ["derive"] }
+crc32fast = "1.4.2"
 env_logger = "0.11.6"
 fs2 = "0.4.3"
 log = "0.4.25"
