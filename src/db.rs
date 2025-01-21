@@ -361,7 +361,6 @@ impl Bitask {
     /// * The key doesn't exist (`Error::KeyNotFound`)
     /// * The data file is missing (`Error::FileNotFound`)
     /// * IO operations fail (`Error::Io`)
-    #[must_use]
     pub fn ask(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
