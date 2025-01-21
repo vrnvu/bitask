@@ -33,7 +33,7 @@ fn test_concurrent_reads() -> anyhow::Result<()> {
 #[test]
 fn test_concurrent_writes() -> anyhow::Result<()> {
     let temp = tempdir()?;
-    let mut db = bitask::db::Bitask::open(temp.path())?;
+    let db = bitask::db::Bitask::open(temp.path())?;
     let db = Arc::new(Mutex::new(db));
     let mut handles = vec![];
 
@@ -67,7 +67,7 @@ fn test_concurrent_writes() -> anyhow::Result<()> {
 #[test]
 fn test_concurrent_mixed_operations() -> anyhow::Result<()> {
     let temp = tempdir()?;
-    let mut db = bitask::db::Bitask::open(temp.path())?;
+    let db = bitask::db::Bitask::open(temp.path())?;
     let db = Arc::new(Mutex::new(db));
     let mut handles = vec![];
 
