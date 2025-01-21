@@ -28,7 +28,7 @@ This implementation provides:
   - In-memory key directory
   - Basic compaction
   - Crash recovery
-- Only Strings are supported for now to simplify the implementation
+- Only byte arrays (`Vec<u8>`) are supported for keys and values
 
 ## Usage as a CLI
 
@@ -43,19 +43,23 @@ bitask put --key my_key --value my_value
 ## Usage as a library
 
 ```rust
-use bitask::Bitask;
+use bitask::db::Bitask;
 use std::path::Path;
 
-// Open database with exclusive access for writing
-let mut writer = Bitask::exclusive("./db")?;
+// Open database with exclusive access
+let mut db = Bitask::open("./db")?;
 
-// Open database with shared access for reading
-let reader = Bitask::shared("./db")?;
+// Store a value
+db.put(b"key".to_vec(), b"value".to_vec())?;
 
-// Multiple readers can exist simultaneously
-let another_reader = Bitask::shared("./db")?;
+// Retrieve a value
+let value = db.ask(b"key")?;
+assert_eq!(value, b"value");
 
-// But only one writer can exist at a time
-let another_writer = Bitask::exclusive("./db");
-assert_eq!(another_writer.is_err(), true);
+// Remove a value
+db.remove(b"key")?;
+
+// Only one writer can exist at a time
+let another_db = Bitask::open("./db");
+assert!(matches!(another_db.err().unwrap(), bitask::db::Error::WriterLock));
 ```
