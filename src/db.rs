@@ -21,6 +21,10 @@ pub enum Error {
     InvalidEmptyValue,
     #[error("Key size must be greater than 0")]
     InvalidEmptyKey,
+    #[error("Timestamp error: {0}")]
+    TimestampError(#[from] std::time::SystemTimeError),
+    #[error("Timestamp overflow, converting u64 to u32: {0}")]
+    TimestampOverflow(#[from] std::num::TryFromIntError),
 }
 
 /// A Bitask database.
@@ -115,7 +119,7 @@ impl Bitask {
             return Err(Error::InvalidEmptyValue);
         }
 
-        let command = Command::set(key.clone(), value.clone());
+        let command = Command::set(key.clone(), value.clone())?;
         // TODO buffer pool
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
@@ -144,7 +148,7 @@ impl Bitask {
             return Err(Error::InvalidEmptyKey);
         }
 
-        let command = Command::remove(key.clone());
+        let command = Command::remove(key.clone())?;
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
@@ -179,46 +183,36 @@ enum Command {
 
 impl Command {
     /// Create a new set command.
-    pub fn set(key: Vec<u8>, value: Vec<u8>) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .try_into()
-            .unwrap();
+    pub fn set(key: Vec<u8>, value: Vec<u8>) -> Result<Self, Error> {
+        let timestamp = timestamp_as_u32()?;
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
         hasher.update(value.as_slice());
         let crc = hasher.finalize();
 
-        Self::Set {
+        Ok(Self::Set {
             crc,
             timestamp,
             key,
             value,
-        }
+        })
     }
 
     /// Create a new remove command.
-    pub fn remove(key: Vec<u8>) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .try_into()
-            .unwrap();
+    pub fn remove(key: Vec<u8>) -> Result<Self, Error> {
+        let timestamp = timestamp_as_u32()?;
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
         let crc = hasher.finalize();
 
-        Self::Remove {
+        Ok(Self::Remove {
             crc,
             timestamp,
             key,
             value: vec![],
-        }
+        })
     }
 
     /// Serialize the command into a byte array.
@@ -298,13 +292,22 @@ impl Command {
     }
 }
 
+fn timestamp_as_u32() -> Result<u32, Error> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::TimestampError(e))?
+        .as_secs()
+        .try_into()
+        .map_err(|e| Error::TimestampOverflow(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_set_serialization() {
-        let command = Command::set(b"key".to_vec(), b"value".to_vec());
+        let command = Command::set(b"key".to_vec(), b"value".to_vec()).unwrap();
 
         // Extract original values before serialization
         let Command::Set {
@@ -347,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_remove_serialization() {
-        let command = Command::remove(b"key".to_vec());
+        let command = Command::remove(b"key".to_vec()).unwrap();
 
         // Extract original values
         let Command::Remove {
