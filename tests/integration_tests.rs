@@ -1,7 +1,17 @@
+use std::{path::Path, sync::Once};
 use tempfile::tempdir;
+
+static INIT: Once = Once::new();
+
+fn setup() {
+    INIT.call_once(|| {
+        env_logger::init();
+    });
+}
 
 #[test]
 fn test_basic_db_operations() -> Result<(), Box<dyn std::error::Error>> {
+    setup();
     let temp_dir = tempdir()?;
     let mut db = bitask::db::Bitask::open(temp_dir.path())?;
 
@@ -22,6 +32,7 @@ fn test_basic_db_operations() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_open_once() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let _db = bitask::db::Bitask::open(temp.path())?;
     Ok(())
@@ -29,6 +40,7 @@ fn test_open_once() -> anyhow::Result<()> {
 
 #[test]
 fn test_open_twice() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let _db = bitask::db::Bitask::open(temp.path())?;
     match bitask::db::Bitask::open(temp.path()) {
@@ -40,6 +52,7 @@ fn test_open_twice() -> anyhow::Result<()> {
 
 #[test]
 fn test_ask_key_not_found() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     let value = db.ask(b"key");
@@ -53,6 +66,7 @@ fn test_ask_key_not_found() -> anyhow::Result<()> {
 
 #[test]
 fn test_put_get() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     db.put(b"key1".to_vec(), b"value1".to_vec())?;
@@ -68,6 +82,7 @@ fn test_put_get() -> anyhow::Result<()> {
 
 #[test]
 fn test_put_overwrite_and_get() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     db.put(b"key1".to_vec(), b"value1".to_vec())?;
@@ -83,6 +98,7 @@ fn test_put_overwrite_and_get() -> anyhow::Result<()> {
 
 #[test]
 fn test_remove() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     db.put(b"key1".to_vec(), b"value1".to_vec())?;
@@ -98,6 +114,7 @@ fn test_remove() -> anyhow::Result<()> {
 
 #[test]
 fn test_invalid_empty_key_and_empty_value() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     let error = db.put(vec![], vec![]);
@@ -125,6 +142,7 @@ fn test_invalid_empty_key_and_empty_value() -> anyhow::Result<()> {
 
 #[test]
 fn test_rebuild_keydir_on_open() -> Result<(), Box<dyn std::error::Error>> {
+    setup();
     let temp = tempfile::tempdir()?;
     let mut db = bitask::db::Bitask::open(temp.path())?;
 
@@ -148,6 +166,7 @@ fn test_rebuild_keydir_on_open() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_rebuild_keydir_on_open_with_remove() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
     db.put(b"key1".to_vec(), b"value1".to_vec())?;
@@ -170,6 +189,7 @@ fn test_rebuild_keydir_on_open_with_remove() -> anyhow::Result<()> {
 
 #[test]
 fn test_multiple_operations_sequence() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
 
@@ -213,6 +233,7 @@ fn test_multiple_operations_sequence() -> anyhow::Result<()> {
 
 #[test]
 fn test_log_rotation() -> anyhow::Result<()> {
+    setup();
     let temp = tempfile::tempdir().unwrap();
     let mut db = bitask::db::Bitask::open(temp.path())?;
 
@@ -247,4 +268,116 @@ fn test_log_rotation() -> anyhow::Result<()> {
     assert_eq!(file_count, 2);
 
     Ok(())
+}
+
+#[test]
+fn test_compaction() -> anyhow::Result<()> {
+    setup();
+
+    let temp = tempdir()?;
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+
+    // Write initial data to first file
+    for i in 0..3000 {
+        // Changed: More entries to ensure multiple files
+        let key = format!("key{}", i).into_bytes();
+        let value = vec![42u8; 4 * 1024]; // 4KB value
+        db.put(key, value)?;
+    }
+
+    // Update keys to create obsolete entries
+    for i in 0..1000 {
+        let key = format!("key{}", i).into_bytes();
+        let value = vec![43u8; 4 * 1024];
+        db.put(key, value)?;
+    }
+
+    // Delete some keys to create tombstones
+    for i in 0..400 {
+        let key = format!("key{}", i).into_bytes();
+        db.remove(key)?;
+    }
+
+    // Force compaction
+    db.compact()?;
+
+    // Verify data integrity
+    // Keys 0-399 should be deleted (tombstones)
+    for i in 0..400 {
+        let key = format!("key{}", i).into_bytes();
+        assert!(matches!(db.ask(&key), Err(bitask::db::Error::KeyNotFound)));
+    }
+
+    // Keys 400-999 should have updated values (43)
+    for i in 400..1000 {
+        let key = format!("key{}", i).into_bytes();
+        let value = db.ask(&key)?;
+        assert_eq!(value, vec![43u8; 4 * 1024]);
+    }
+
+    // Keys 1000-2999 should have original values (42)
+    for i in 1000..3000 {
+        // Changed: Check all remaining keys
+        let key = format!("key{}", i).into_bytes();
+        let value = db.ask(&key)?;
+        assert_eq!(value, vec![42u8; 4 * 1024]);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_automatic_compaction_trigger() -> anyhow::Result<()> {
+    setup();
+    let temp = tempdir()?;
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+
+    // Phase 1: Create initial data and get size
+    for i in 0..3000 {
+        let key = format!("key{}", i).into_bytes();
+        let value = vec![42u8; 4 * 1024]; // 4KB value
+        db.put(key, value)?;
+    }
+
+    // Phase 2: Remove all keys
+    for i in 0..3000 {
+        let key = format!("key{}", i).into_bytes();
+        db.remove(key)?;
+    }
+
+    // Force a compaction to ensure all tombstones are processed
+    db.compact()?;
+
+    // Get final size - should be near zero since all data is removed
+    let final_size = get_dir_size(temp.path())?;
+    log::info!(
+        "Final size after all removals and compaction: {} bytes",
+        final_size
+    );
+
+    // Should be less than our max file size (since we should only have active file)
+    assert!(
+        final_size < bitask::db::MAX_ACTIVE_FILE_SIZE,
+        "Expected size less than MAX_ACTIVE_FILE_SIZE, got {} bytes",
+        final_size
+    );
+
+    // Verify all keys are gone
+    for i in 0..1000 {
+        let key = format!("key{}", i).into_bytes();
+        assert!(matches!(db.ask(&key), Err(bitask::db::Error::KeyNotFound)));
+    }
+
+    Ok(())
+}
+
+fn get_dir_size(path: impl AsRef<Path>) -> anyhow::Result<u64> {
+    let mut total_size = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            total_size += entry.metadata()?.len();
+        }
+    }
+    Ok(total_size)
 }

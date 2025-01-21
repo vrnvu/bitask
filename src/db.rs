@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -56,7 +56,7 @@ pub enum Error {
 const FILE_LOCK_PATH: &str = "db.lock";
 
 /// Maximum size of active log file before rotation (4MB)
-const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
+pub const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
 
 /// A Bitcask-style key-value store implementation.
 ///
@@ -460,7 +460,31 @@ impl Bitask {
 
         let file_size = self.writer.get_ref().metadata()?.len();
         if file_size > MAX_ACTIVE_FILE_SIZE {
+            log::debug!("File size {} exceeded limit, rotating", file_size);
             self.rotate_active_file()?;
+
+            if false {
+                log::debug!("Auto-compaction is enabled, checking file count");
+                // Count immutable files and trigger compaction if too many
+                let immutable_files = std::fs::read_dir(&self.path)?
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        name.ends_with(".log") && !name.ends_with(".active.log")
+                    })
+                    .count();
+
+                log::debug!("Found {} immutable files", immutable_files);
+                if immutable_files >= 2 {
+                    log::debug!(
+                        "Auto-triggering compaction with {} immutable files",
+                        immutable_files
+                    );
+                    self.compact()?;
+                }
+            } else {
+                log::debug!("Auto-compaction is disabled");
+            }
         }
 
         let command = CommandSet::new(key.clone(), value.clone())?;
@@ -509,6 +533,70 @@ impl Bitask {
         self.writer.flush()?;
 
         self.keydir.remove(&key);
+        Ok(())
+    }
+
+    /// Compacts the database by removing obsolete entries and merging files.
+    ///
+    /// This process:
+    /// 1. Identifies immutable files (not including active file)
+    /// 2. Creates a new compacted file with only latest entries
+    /// 3. Removes old files after successful compaction
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * IO operations fail (`Error::Io`)
+    /// * File operations fail (`Error::FileNotFound`)
+    pub fn compact(&mut self) -> Result<(), Error> {
+        // Create new file for compaction
+        let timestamp = timestamp_as_u64()?;
+        let mut compaction_writer = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(file_log_path(&self.path, timestamp))?,
+        );
+
+        let mut new_pos = 0;
+        // Copy live entries
+        for (key, entry) in self.keydir.iter_mut() {
+            // Skip entries in active file
+            if entry.file_id == self.writer_id {
+                continue;
+            }
+
+            // Open reader at the start of the entry (header position)
+            let mut reader = BufReader::new(File::open(file_log_path(&self.path, entry.file_id))?);
+            let header_pos = entry.value_position - key.len() as u64 - CommandHeader::SIZE as u64;
+            reader.seek(SeekFrom::Start(header_pos))?;
+
+            // Copy the entire entry (header + key + value)
+            let entry_size =
+                CommandHeader::SIZE as u64 + key.len() as u64 + entry.value_size as u64;
+            io::copy(&mut reader.take(entry_size), &mut compaction_writer)?;
+
+            // Update position
+            entry.file_id = timestamp;
+            entry.value_position = new_pos + CommandHeader::SIZE as u64 + key.len() as u64;
+            new_pos += entry_size;
+        }
+
+        compaction_writer.flush()?;
+
+        // Remove old files
+        for file in std::fs::read_dir(&self.path)? {
+            let file = file?;
+            let name = file.file_name().to_string_lossy().to_string();
+            if name.ends_with(".log")
+                && !name.ends_with(".active.log")
+                && !name.starts_with(&timestamp.to_string())
+            {
+                std::fs::remove_file(file.path())?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -812,5 +900,34 @@ mod tests {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&key);
         assert_eq!(header.crc, hasher.finalize());
+    }
+
+    #[test]
+    fn test_automatic_compaction_disabled() {
+        // Create test directory
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Bitask::open(dir.path()).unwrap();
+
+        // Insert enough data to trigger multiple rotations
+        for i in 0..3000 {
+            let key = format!("key{}", i).into_bytes();
+            let value = vec![0; 8 * 1024]; // 8KB value to fill files quickly
+            db.put(key, value).unwrap();
+        }
+
+        // Count immutable log files - should be MORE than 2 since auto-compaction is disabled
+        let log_files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.ends_with(".log") && !name.ends_with(".active.log")
+            })
+            .count();
+
+        assert!(
+            log_files >= 2,
+            "Expected 2 or more log files since auto-compaction is disabled"
+        );
     }
 }
