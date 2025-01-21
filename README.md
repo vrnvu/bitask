@@ -24,9 +24,9 @@ This implementation provides:
 - A command-line interface (`bitask`) for interacting with the key-value store
 - A Rust library crate that can be used as a dependency in other projects
 - Core Bitcask features including:
-  - Append-only log files
+  - Append-only log files with automatic rotation (4MB per file)
   - In-memory key directory
-  - Basic compaction
+  - Process-safe file locking
   - Crash recovery
 - Only byte arrays (`Vec<u8>`) are supported for keys and values
 
@@ -63,3 +63,11 @@ db.remove(b"key")?;
 let another_db = Bitask::open("./db");
 assert!(matches!(another_db.err().unwrap(), bitask::db::Error::WriterLock));
 ```
+
+## Implementation Details
+
+### Log Rotation
+- Active log files are automatically rotated when they reach 4MB
+- Each log file is named with a timestamp (e.g., `1234567890.log`)
+- Active file has `.active.log` extension
+- After rotation, the old file is renamed to `.log` and a new `.active.log` is created

@@ -55,6 +55,9 @@ pub enum Error {
 /// The name of the file lock. Used to ensure only one writer at a time and process safety.
 const FILE_LOCK_PATH: &str = "db.lock";
 
+/// Maximum size of active log file before rotation (4MB)
+const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
+
 /// A Bitcask-style key-value store implementation.
 ///
 /// Bitcask is an append-only log-structured storage engine that maintains an in-memory
@@ -348,6 +351,35 @@ impl Bitask {
         Ok(keydir)
     }
 
+    fn rotate_active_file(&mut self) -> Result<(), Error> {
+        let timestamp = timestamp_as_u64()?;
+
+        // Rename current active file to regular log file
+        let old_path = file_active_log_path(&self.path, self.writer_id);
+        let new_path = file_log_path(&self.path, self.writer_id);
+        fs::rename(old_path, new_path)?;
+
+        // Create new active file
+        let writer_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(file_active_log_path(&self.path, timestamp))?;
+
+        let reader_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(file_active_log_path(&self.path, timestamp))?;
+
+        // Update writer and readers
+        self.writer = BufWriter::new(writer_file);
+        self.readers.insert(timestamp, BufReader::new(reader_file));
+        self.writer_id = timestamp;
+
+        Ok(())
+    }
+
     /// Retrieves the value associated with the given key.
     ///
     /// # Parameters
@@ -412,6 +444,11 @@ impl Bitask {
 
         if value.is_empty() {
             return Err(Error::InvalidEmptyValue);
+        }
+
+        let file_size = self.writer.get_ref().metadata()?.len();
+        if file_size > MAX_ACTIVE_FILE_SIZE {
+            self.rotate_active_file()?;
         }
 
         let command = CommandSet::new(key.clone(), value.clone())?;

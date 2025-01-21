@@ -210,3 +210,41 @@ fn test_multiple_operations_sequence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_log_rotation() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+
+    // Create a 4MiB value (just over the MAX_ACTIVE_FILE_SIZE)
+    let key = b"large_key".to_vec();
+    let value = vec![42u8; 4 * 1024 * 1024];
+
+    // First write should create initial file
+    db.put(key.clone(), value.clone())?;
+
+    // Second write should trigger rotation
+    let key2 = b"large_key2".to_vec();
+    db.put(key2.clone(), value.clone())?;
+
+    // Verify both values are readable
+    assert_eq!(db.ask(&key)?, value);
+    assert_eq!(db.ask(&key2)?, value);
+
+    // Verify we have two files in the directory
+    let file_count = std::fs::read_dir(temp.path())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext == "log")
+                .unwrap_or(false)
+        })
+        .count();
+
+    assert_eq!(file_count, 2);
+
+    Ok(())
+}
