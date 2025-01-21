@@ -187,7 +187,7 @@ impl Bitask {
             BufReader::new(reader_file)
         };
 
-        let keydir = Self::rebuild_keydir(&mut reader)?;
+        let keydir = Self::rebuild_keydir(&mut reader, active_timestamp)?;
 
         let mut readers = HashMap::new();
         readers.insert(active_timestamp, reader);
@@ -204,46 +204,48 @@ impl Bitask {
 
     fn rebuild_keydir(
         reader: &mut BufReader<File>,
+        file_id: u32,
     ) -> Result<BTreeMap<Vec<u8>, KeyDirEntry>, Error> {
         let mut keydir = BTreeMap::new();
         let mut position = 0u64;
+
         loop {
-            // Read header (16 bytes total)
-            let mut header = [0u8; 16];
-            match reader.read_exact(&mut header) {
+            // Read just the header
+            let mut header_buf = vec![0u8; CommandHeader::SIZE];
+            match reader.read_exact(&mut header_buf) {
                 Ok(_) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e.into()),
             }
 
-            let crc = u32::from_le_bytes(header[0..4].try_into().unwrap());
-            let timestamp = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            let key_len = u32::from_le_bytes(header[8..12].try_into().unwrap());
-            let value_len = u32::from_le_bytes(header[12..16].try_into().unwrap());
+            let header = CommandHeader::deserialize(&header_buf)?;
 
-            // Read key
-            let mut key = vec![0u8; key_len as usize];
+            // Read just the key
+            let mut key = vec![0u8; header.key_len as usize];
             reader.read_exact(&mut key)?;
 
-            if value_len == 0 {
-                // Remove command - delete from keydir
+            // Skip the value bytes
+            reader.seek(SeekFrom::Current(header.value_size as i64))?;
+
+            if header.value_size == 0 {
+                // Remove command
                 keydir.remove(&key);
             } else {
-                // Set command - add to keydir and skip value
-                let value_position = position + 16 + key_len as u64;
+                // Set command
+                let value_position = position + CommandHeader::SIZE as u64 + header.key_len as u64;
                 keydir.insert(
                     key,
                     KeyDirEntry {
-                        file_id: timestamp,
-                        value_size: value_len,
+                        file_id,
+                        value_size: header.value_size,
                         value_position,
-                        timestamp,
+                        timestamp: header.timestamp,
                     },
                 );
-                reader.seek(SeekFrom::Current(value_len as i64))?;
             }
 
-            position += 16 + key_len as u64 + value_len as u64;
+            position +=
+                CommandHeader::SIZE as u64 + header.key_len as u64 + header.value_size as u64;
         }
         Ok(keydir)
     }
@@ -254,11 +256,12 @@ impl Bitask {
         }
 
         if let Some(entry) = self.keydir.get(key) {
-            if !self.readers.contains_key(&entry.file_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.readers.entry(entry.file_id)
+            {
                 let file = OpenOptions::new()
                     .read(true)
-                    .open(self.path.join(format!("{}.log", entry.file_id)))?;
-                self.readers.insert(entry.file_id, BufReader::new(file));
+                    .open(file_log_path(&self.path, entry.file_id))?;
+                e.insert(BufReader::new(file));
             }
 
             let reader = self
@@ -267,13 +270,12 @@ impl Bitask {
                 .ok_or(Error::FileNotFound(format!("{}", entry.file_id)))?;
 
             reader.seek(SeekFrom::Start(entry.value_position))?;
-            // TODO buffer pool
-            let mut value = vec![0u8; entry.value_size as usize];
+            let mut value = vec![0; entry.value_size as usize]; // Initialize with zeros
             reader.read_exact(&mut value)?;
             return Ok(value);
         }
 
-        return Err(Error::KeyNotFound);
+        Err(Error::KeyNotFound)
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
@@ -286,7 +288,6 @@ impl Bitask {
         }
 
         let command = Command::set(key.clone(), value.clone())?;
-        // TODO buffer pool
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
@@ -326,6 +327,51 @@ impl Bitask {
     }
 }
 
+#[derive(Debug)]
+struct CommandHeader {
+    crc: u32,
+    timestamp: u32,
+    key_len: u32,
+    value_size: u32,
+}
+
+impl CommandHeader {
+    const SIZE: usize = 16; // 4 bytes * 4 fields
+
+    fn new(crc: u32, timestamp: u32, key_len: u32, value_len: u32) -> Self {
+        Self {
+            crc,
+            timestamp,
+            key_len,
+            value_size: value_len,
+        }
+    }
+
+    fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+        buffer.write_all(&self.crc.to_le_bytes())?;
+        buffer.write_all(&self.timestamp.to_le_bytes())?;
+        buffer.write_all(&self.key_len.to_le_bytes())?;
+        buffer.write_all(&self.value_size.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn deserialize(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::SIZE {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "buffer too small for header",
+            )));
+        }
+
+        Ok(Self {
+            crc: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            timestamp: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            key_len: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            value_size: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+        })
+    }
+}
+
 /// A command to be executed on the database.
 /// Each command is serialized and appended to the active file WAL.
 enum Command {
@@ -343,7 +389,6 @@ enum Command {
         crc: u32,
         timestamp: u32,
         key: Vec<u8>,
-        value: Vec<u8>,
     },
 }
 
@@ -385,7 +430,6 @@ impl Command {
             crc,
             timestamp,
             key,
-            value: vec![],
         })
     }
 
@@ -398,25 +442,20 @@ impl Command {
                 key,
                 value,
             } => {
-                buffer.write_all(&crc.to_le_bytes())?;
-                buffer.write_all(&timestamp.to_le_bytes())?;
-                buffer.write_all(&(key.len() as u32).to_le_bytes())?;
-                buffer.write_all(&(value.len() as u32).to_le_bytes())?;
-                buffer.write_all(key.as_slice())?;
-                buffer.write_all(value.as_slice())?;
+                let header =
+                    CommandHeader::new(*crc, *timestamp, key.len() as u32, value.len() as u32);
+                header.serialize(buffer)?;
+                buffer.write_all(key)?;
+                buffer.write_all(value)?;
             }
             Self::Remove {
-                timestamp,
                 crc,
+                timestamp,
                 key,
-                value,
             } => {
-                buffer.write_all(&crc.to_le_bytes())?;
-                buffer.write_all(&timestamp.to_le_bytes())?;
-                buffer.write_all(&(key.len() as u32).to_le_bytes())?;
-                buffer.write_all(&(value.len() as u32).to_le_bytes())?;
-                buffer.write_all(key.as_slice())?;
-                buffer.write_all(value.as_slice())?;
+                let header = CommandHeader::new(*crc, *timestamp, key.len() as u32, 0);
+                header.serialize(buffer)?;
+                buffer.write_all(key)?;
             }
         }
         Ok(())
@@ -424,41 +463,25 @@ impl Command {
 
     /// Deserialize the command from a byte array.
     fn deserialize(buf: &[u8]) -> Result<Self, Error> {
-        let mut reader = Cursor::new(buf);
+        let header = CommandHeader::deserialize(buf)?;
+        let key_start = CommandHeader::SIZE;
+        let key_end = key_start + header.key_len as usize;
 
-        let mut crc_buffer = [0u8; 4];
-        reader.read_exact(&mut crc_buffer)?;
-        let crc = u32::from_le_bytes(crc_buffer);
+        let key = buf[key_start..key_end].to_vec();
 
-        let mut timestamp_buffer = [0u8; 4];
-        reader.read_exact(&mut timestamp_buffer)?;
-        let timestamp = u32::from_le_bytes(timestamp_buffer);
-
-        let mut key_buffer = [0u8; 4];
-        reader.read_exact(&mut key_buffer)?;
-        let key_size = u32::from_le_bytes(key_buffer);
-
-        let mut value_buffer = [0u8; 4];
-        reader.read_exact(&mut value_buffer)?;
-        let value_size = u32::from_le_bytes(value_buffer);
-
-        let mut key = vec![0u8; key_size as usize];
-        reader.read_exact(&mut key)?;
-
-        if value_size == 0 {
+        if header.value_size == 0 {
             Ok(Self::Remove {
-                timestamp,
-                crc,
+                crc: header.crc,
+                timestamp: header.timestamp,
                 key,
-                value: vec![],
             })
         } else {
-            let mut value = vec![0u8; value_size as usize];
-            reader.read_exact(&mut value)?;
+            let value_end = key_end + header.value_size as usize;
+            let value = buf[key_end..value_end].to_vec();
 
             Ok(Self::Set {
-                timestamp,
-                crc,
+                crc: header.crc,
+                timestamp: header.timestamp,
                 key,
                 value,
             })
@@ -477,10 +500,10 @@ fn file_log_path(path: impl AsRef<Path>, timestamp: u32) -> PathBuf {
 fn timestamp_as_u32() -> Result<u32, Error> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| Error::TimestampError(e))?
+        .map_err(Error::TimestampError)?
         .as_secs()
         .try_into()
-        .map_err(|e| Error::TimestampOverflow(e))
+        .map_err(Error::TimestampOverflow)
 }
 
 #[cfg(test)]
@@ -522,8 +545,8 @@ mod tests {
 
                 // Verify CRC is correct
                 let mut hasher = crc32fast::Hasher::new();
-                hasher.update(&key);
-                hasher.update(&value);
+                hasher.update(key);
+                hasher.update(value);
                 assert_eq!(crc, hasher.finalize());
             }
             Command::Remove { .. } => panic!("Expected Set command"),
@@ -539,7 +562,6 @@ mod tests {
             crc,
             timestamp,
             ref key,
-            ref value,
         } = command
         else {
             panic!("Expected Remove command");
@@ -556,16 +578,14 @@ mod tests {
                 crc: crc2,
                 timestamp: ts2,
                 key: key2,
-                value: value2,
             } => {
                 assert_eq!(crc, crc2);
                 assert_eq!(timestamp, ts2);
                 assert_eq!(*key, key2);
-                assert_eq!(*value, value2);
 
                 // Verify CRC is correct
                 let mut hasher = crc32fast::Hasher::new();
-                hasher.update(&key);
+                hasher.update(key);
                 assert_eq!(crc, hasher.finalize());
             }
             Command::Set { .. } => panic!("Expected Remove command"),

@@ -1,4 +1,3 @@
-use bitask;
 
 #[test]
 fn test_open_once() -> anyhow::Result<()> {
@@ -87,7 +86,7 @@ fn test_invalid_empty_key_and_empty_value() -> anyhow::Result<()> {
         bitask::db::Error::InvalidEmptyKey
     ));
 
-    let error = db.ask(&vec![]);
+    let error = db.ask(&[]);
     assert!(error.is_err());
     assert!(matches!(
         error.err().unwrap(),
