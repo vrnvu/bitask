@@ -1,3 +1,24 @@
+use tempfile::tempdir;
+
+#[test]
+fn test_basic_db_operations() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempdir()?;
+    let mut db = bitask::db::Bitask::open(temp_dir.path())?;
+
+    // Test put and get
+    let key = b"test_key".to_vec();
+    let value = b"test_value".to_vec();
+    db.put(key.clone(), value.clone())?;
+
+    let retrieved = db.ask(&key)?;
+    assert_eq!(retrieved, value);
+
+    // Test remove
+    db.remove(key.clone())?;
+    assert!(matches!(db.ask(&key), Err(bitask::db::Error::KeyNotFound)));
+
+    Ok(())
+}
 
 #[test]
 fn test_open_once() -> anyhow::Result<()> {
@@ -103,19 +124,25 @@ fn test_invalid_empty_key_and_empty_value() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_rebuild_keydir_on_open() -> anyhow::Result<()> {
-    let temp = tempfile::tempdir().unwrap();
+fn test_rebuild_keydir_on_open() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
     let mut db = bitask::db::Bitask::open(temp.path())?;
+
+    // Write some data
     db.put(b"key1".to_vec(), b"value1".to_vec())?;
     db.put(b"key2".to_vec(), b"value2".to_vec())?;
+
+    // Drop the database to close it
     drop(db);
 
+    // Reopen and verify data persists
     let mut db = bitask::db::Bitask::open(temp.path())?;
     let value = db.ask(b"key1")?;
     assert_eq!(value, b"value1");
 
     let value = db.ask(b"key2")?;
     assert_eq!(value, b"value2");
+
     Ok(())
 }
 
@@ -138,5 +165,48 @@ fn test_rebuild_keydir_on_open_with_remove() -> anyhow::Result<()> {
 
     let value = db.ask(b"key2")?;
     assert_eq!(value, b"value2");
+    Ok(())
+}
+
+#[test]
+fn test_multiple_operations_sequence() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+
+    // Insert multiple key-value pairs
+    for i in 0..100 {
+        let key = format!("key{}", i).into_bytes();
+        let value = format!("value{}", i).into_bytes();
+        db.put(key, value)?;
+    }
+
+    // Verify all values
+    for i in 0..100 {
+        let key = format!("key{}", i).into_bytes();
+        let expected = format!("value{}", i).into_bytes();
+        let value = db.ask(&key)?;
+        assert_eq!(value, expected);
+    }
+
+    // Remove every other key
+    for i in (0..100).step_by(2) {
+        let key = format!("key{}", i).into_bytes();
+        db.remove(key)?;
+    }
+
+    // Verify remaining and removed keys
+    for i in 0..100 {
+        let key = format!("key{}", i).into_bytes();
+        let result = db.ask(&key);
+        if i % 2 == 0 {
+            assert!(matches!(
+                result.err().unwrap(),
+                bitask::db::Error::KeyNotFound
+            ));
+        } else {
+            assert_eq!(result?, format!("value{}", i).into_bytes());
+        }
+    }
+
     Ok(())
 }

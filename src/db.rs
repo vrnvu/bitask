@@ -1,7 +1,12 @@
+//! A Bitcask-style key-value store implementation.
+//!
+//! This crate provides a simple, efficient key-value store based on the Bitcask paper.
+//! It uses an append-only log structure with an in-memory index for fast lookups.
+
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -9,10 +14,10 @@ use fs2::FileExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Invalid log file name '{filename}'. Expected format: 'timestamp.log' or 'timestamp.active.log'")]
+    #[error("Invalid log file name '{filename}'")]
     InvalidLogFileName { filename: String },
 
-    #[error("Failed to parse timestamp '{value}' from log filename: {source}")]
+    #[error("Failed to parse timestamp '{value}'")]
     TimestampParse {
         value: String,
         #[source]
@@ -21,54 +26,112 @@ pub enum Error {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
     #[error("Only one writer allowed at a time")]
     WriterLock,
+
     #[error("Key not found")]
     KeyNotFound,
+
     #[error("File {0} not found")]
     FileNotFound(String),
+
     #[error("Value size must be greater than 0")]
     InvalidEmptyValue,
+
     #[error("Key size must be greater than 0")]
     InvalidEmptyKey,
+
     #[error("Timestamp error: {0}")]
     TimestampError(#[from] std::time::SystemTimeError),
-    #[error("Timestamp overflow, converting u64 to u32: {0}")]
+
+    #[error("Timestamp overflow, converting to u64: {0}")]
     TimestampOverflow(#[from] std::num::TryFromIntError),
+
     #[error("Active file not found in non empty path")]
     ActiveFileNotFound,
 }
 
-/// A Bitask database.
+/// The name of the file lock. Used to ensure only one writer at a time and process safety.
+const FILE_LOCK_PATH: &str = "db.lock";
+
+/// A Bitcask-style key-value store implementation.
 ///
-/// Only one instance can have write access at a time across all processes and threads.
-/// The locking is handled at the OS level through file system locks.
+/// Bitcask is an append-only log-structured storage engine that maintains an in-memory
+/// index (keydir) mapping keys to their most recent value locations on disk.
+///
+/// # Features
+/// - Single-writer, multiple-reader architecture
+/// - Process-safe file locking
+/// - Append-only log structure
+/// - In-memory key directory
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```no_run
+/// use bitask::Bitask;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut db = bitask::db::Bitask::open("my_db")?;
+///
+/// // Store a value
+/// db.put(b"key".to_vec(), b"value".to_vec())?;
+///
+/// // Retrieve a value
+/// let value = db.ask(b"key")?;
+/// assert_eq!(value, b"value");
+///
+/// // Remove a value
+/// db.remove(b"key".to_vec())?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
 pub struct Bitask {
     path: PathBuf,
-    file_lock: File,
+    _file_lock: File,
 
-    writer_id: u32,
+    writer_id: u64,
     writer: BufWriter<File>,
 
-    readers: HashMap<u32, BufReader<File>>,
+    readers: HashMap<u64, BufReader<File>>,
 
     keydir: BTreeMap<Vec<u8>, KeyDirEntry>,
 }
 
+/// Entry in the key directory mapping a key to its location on disk
+#[derive(Debug)]
 struct KeyDirEntry {
-    file_id: u32,
+    /// File ID (timestamp) containing the value
+    file_id: u64,
+    /// Size of the value in bytes
     value_size: u32,
+    /// Offset position of the value within the file
     value_position: u64,
-    timestamp: u32,
+    /// Timestamp when the entry was written
+    timestamp: u64,
 }
 
 impl Bitask {
-    /// Open a Bitask database for exclusive writing and reading.
-    /// Only one writer is allowed at a time across all processes and threads.
-    /// This will create the database if it doesn't exist.
+    /// Opens a Bitcask database at the specified path with exclusive write access.
+    ///
+    /// Creates a new database if one doesn't exist at the specified path.
+    /// Uses file system locks to ensure only one writer exists across all processes.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - Path where the database files will be stored
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * Another process has write access (`Error::WriterLock`)
+    /// * Filesystem operations fail (`Error::Io`)
+    /// * No active file is found when opening existing DB (`Error::ActiveFileNotFound`)
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         fs::create_dir_all(&path)?;
-        let lock_path = path.as_ref().join("db.lock");
+        let lock_path = path.as_ref().join(FILE_LOCK_PATH);
 
         let lock_file = OpenOptions::new()
             .create(true)
@@ -84,7 +147,7 @@ impl Bitask {
 
         let is_empty = match fs::read_dir(&path)?.next() {
             None => true,
-            Some(Ok(entry)) if entry.file_name() == "db.lock" => {
+            Some(Ok(entry)) if entry.file_name() == FILE_LOCK_PATH => {
                 // If first entry is db.lock, check if there's a second entry
                 fs::read_dir(&path)?.nth(1).is_none()
             }
@@ -98,8 +161,20 @@ impl Bitask {
         }
     }
 
+    /// Creates a new database at the specified path.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - Path where the database files will be stored
+    /// * `lock_file` - The exclusive lock file for this database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * Filesystem operations fail (`Error::Io`)
+    /// * System time operations fail (`Error::TimestampError`)
     fn open_new(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
-        let timestamp = timestamp_as_u32()?;
+        let timestamp = timestamp_as_u64()?;
 
         let writer_file = OpenOptions::new()
             .create(true)
@@ -122,7 +197,7 @@ impl Bitask {
 
         Ok(Self {
             path: path.as_ref().to_path_buf(),
-            file_lock: lock_file,
+            _file_lock: lock_file,
             writer_id: timestamp,
             writer,
             readers,
@@ -130,15 +205,29 @@ impl Bitask {
         })
     }
 
+    /// Opens an existing database at the specified path.
+    ///
+    /// # Parameters
+    ///
+    /// * `path` - Path where the database files are stored
+    /// * `lock_file` - The exclusive lock file for this database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * Filesystem operations fail (`Error::Io`)
+    /// * Log file names are malformed (`Error::InvalidLogFileName`)
+    /// * Timestamps in filenames are invalid (`Error::TimestampParse`)
+    /// * No active log file exists (`Error::ActiveFileNotFound`)
     fn open_existing(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
         let mut active_timestamp = None;
         let mut active_file = None;
-        let mut files: BTreeMap<u32, PathBuf> = BTreeMap::new();
+        let mut files: BTreeMap<u64, PathBuf> = BTreeMap::new();
 
         for entry in fs::read_dir(&path)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "db.lock" {
+            if name == FILE_LOCK_PATH {
                 continue;
             }
 
@@ -194,7 +283,7 @@ impl Bitask {
 
         Ok(Self {
             path: path.as_ref().to_path_buf(),
-            file_lock: lock_file,
+            _file_lock: lock_file,
             writer_id: active_timestamp,
             writer,
             readers,
@@ -204,9 +293,9 @@ impl Bitask {
 
     fn rebuild_keydir(
         reader: &mut BufReader<File>,
-        file_id: u32,
+        file_id: u64,
     ) -> Result<BTreeMap<Vec<u8>, KeyDirEntry>, Error> {
-        let mut keydir = BTreeMap::new();
+        let mut keydir: BTreeMap<Vec<u8>, KeyDirEntry> = BTreeMap::new();
         let mut position = 0u64;
 
         loop {
@@ -232,16 +321,25 @@ impl Bitask {
                 keydir.remove(&key);
             } else {
                 // Set command
-                let value_position = position + CommandHeader::SIZE as u64 + header.key_len as u64;
-                keydir.insert(
-                    key,
-                    KeyDirEntry {
-                        file_id,
-                        value_size: header.value_size,
-                        value_position,
-                        timestamp: header.timestamp,
-                    },
-                );
+                match keydir.get(&key) {
+                    Some(existing) if existing.timestamp >= header.timestamp => {
+                        // Skip older or same-age entries
+                        continue;
+                    }
+                    _ => {
+                        let value_position =
+                            position + CommandHeader::SIZE as u64 + header.key_len as u64;
+                        keydir.insert(
+                            key,
+                            KeyDirEntry {
+                                file_id,
+                                value_size: header.value_size,
+                                value_position,
+                                timestamp: header.timestamp,
+                            },
+                        );
+                    }
+                }
             }
 
             position +=
@@ -250,6 +348,20 @@ impl Bitask {
         Ok(keydir)
     }
 
+    /// Retrieves the value associated with the given key.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The key is empty (`Error::InvalidEmptyKey`)
+    /// * The key doesn't exist (`Error::KeyNotFound`)
+    /// * The data file is missing (`Error::FileNotFound`)
+    /// * IO operations fail (`Error::Io`)
+    #[must_use]
     pub fn ask(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
@@ -278,6 +390,22 @@ impl Bitask {
         Err(Error::KeyNotFound)
     }
 
+    /// Stores a key-value pair in the database.
+    ///
+    /// If the key already exists, it will be updated with the new value.
+    /// The operation is atomic and durable (synced to disk).
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to store
+    /// * `value` - The value to associate with the key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The key is empty (`Error::InvalidEmptyKey`)
+    /// * The value is empty (`Error::InvalidEmptyValue`)
+    /// * IO operations fail (`Error::Io`)
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
@@ -287,7 +415,7 @@ impl Bitask {
             return Err(Error::InvalidEmptyValue);
         }
 
-        let command = Command::set(key.clone(), value.clone())?;
+        let command = CommandSet::new(key.clone(), value.clone())?;
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
@@ -296,26 +424,36 @@ impl Bitask {
         self.writer.write_all(&buffer)?;
         self.writer.flush()?;
 
-        // 4(crc) + 4(timestamp) + 4(keylen) + 4(valuelen) + keylen
-        let value_position = position + 16 + key.len() as u64;
+        let value_position = position + CommandHeader::SIZE as u64 + key.len() as u64;
         self.keydir.insert(
             key,
             KeyDirEntry {
                 file_id: self.writer_id,
                 value_size: value.len() as u32,
                 value_position,
-                timestamp: command.timestamp(),
+                timestamp: command.timestamp,
             },
         );
         Ok(())
     }
 
+    /// Removes a key-value pair from the database.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to remove
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The key is empty (`Error::InvalidEmptyKey`)
+    /// * IO operations fail (`Error::Io`)
     pub fn remove(&mut self, key: Vec<u8>) -> Result<(), Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
         }
 
-        let command = Command::remove(key.clone())?;
+        let command = CommandRemove::new(key.clone())?;
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
@@ -327,18 +465,36 @@ impl Bitask {
     }
 }
 
+/// Header structure for commands stored in the log files.
+/// Contains metadata about the stored key-value pairs.
 #[derive(Debug)]
 struct CommandHeader {
+    /// CRC32 checksum of the key and value
     crc: u32,
-    timestamp: u32,
+    /// Timestamp when the command was written
+    timestamp: u64,
+    /// Length of the key in bytes
     key_len: u32,
+    /// Size of the value in bytes (0 for remove commands)
     value_size: u32,
 }
 
 impl CommandHeader {
-    const SIZE: usize = 16; // 4 bytes * 4 fields
+    /// Size of the header in bytes, computed from its field types.
+    const SIZE: usize = std::mem::size_of::<u32>()
+        + std::mem::size_of::<u64>()
+        + std::mem::size_of::<u32>()
+        + std::mem::size_of::<u32>();
 
-    fn new(crc: u32, timestamp: u32, key_len: u32, value_len: u32) -> Self {
+    /// Creates a new command header.
+    ///
+    /// # Parameters
+    ///
+    /// * `crc` - CRC32 checksum of the key and value
+    /// * `timestamp` - Current timestamp in milliseconds
+    /// * `key_len` - Length of the key in bytes
+    /// * `value_len` - Length of the value in bytes
+    fn new(crc: u32, timestamp: u64, key_len: u32, value_len: u32) -> Self {
         Self {
             crc,
             timestamp,
@@ -347,6 +503,15 @@ impl CommandHeader {
         }
     }
 
+    /// Serializes the header to a byte buffer.
+    ///
+    /// # Parameters
+    ///
+    /// * `buffer` - The buffer to write the header to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write operations fail (`Error::Io`)
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         buffer.write_all(&self.crc.to_le_bytes())?;
         buffer.write_all(&self.timestamp.to_le_bytes())?;
@@ -355,6 +520,17 @@ impl CommandHeader {
         Ok(())
     }
 
+    /// Deserializes a header from a byte buffer.
+    ///
+    /// # Parameters
+    ///
+    /// * `buf` - The buffer containing the header data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The buffer is too small (`Error::Io`)
+    /// * The buffer contains invalid data
     fn deserialize(buf: &[u8]) -> Result<Self, Error> {
         if buf.len() < Self::SIZE {
             return Err(Error::Io(std::io::Error::new(
@@ -365,52 +541,52 @@ impl CommandHeader {
 
         Ok(Self {
             crc: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-            timestamp: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-            key_len: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            value_size: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            timestamp: u64::from_le_bytes(buf[4..12].try_into().unwrap()),
+            key_len: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            value_size: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
         })
     }
 }
 
-/// A command to be executed on the database.
-/// Each command is serialized and appended to the active file WAL.
-enum Command {
-    /// Append a key-value pair.
-    /// value_size must be greater than 0.
-    Set {
-        crc: u32,
-        timestamp: u32,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
-    /// Remove a key.
-    /// If value_size is 0, the key is removed from the keydir.
-    Remove {
-        crc: u32,
-        timestamp: u32,
-        key: Vec<u8>,
-    },
+/// A command to append a key-value pair to the log.
+#[derive(Debug)]
+struct CommandSet {
+    crc: u32,
+    timestamp: u64,
+    key: Vec<u8>,
+    value: Vec<u8>,
 }
 
-impl Command {
-    /// Get the timestamp of the command.
-    pub fn timestamp(&self) -> u32 {
-        match self {
-            Self::Set { timestamp, .. } => *timestamp,
-            Self::Remove { timestamp, .. } => *timestamp,
-        }
-    }
+/// A command to remove a key from the database.
+#[derive(Debug)]
+struct CommandRemove {
+    crc: u32,
+    timestamp: u64,
+    key: Vec<u8>,
+}
 
-    /// Create a new set command.
-    pub fn set(key: Vec<u8>, value: Vec<u8>) -> Result<Self, Error> {
-        let timestamp = timestamp_as_u32()?;
+impl CommandSet {
+    /// Creates a new set command.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to store
+    /// * `value` - The value to associate with the key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * System time operations fail (`Error::TimestampError`)
+    /// * Timestamp conversion fails (`Error::TimestampOverflow`)
+    pub fn new(key: Vec<u8>, value: Vec<u8>) -> Result<Self, Error> {
+        let timestamp = timestamp_as_u64()?;
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
         hasher.update(value.as_slice());
         let crc = hasher.finalize();
 
-        Ok(Self::Set {
+        Ok(Self {
             crc,
             timestamp,
             key,
@@ -418,90 +594,111 @@ impl Command {
         })
     }
 
-    /// Create a new remove command.
-    pub fn remove(key: Vec<u8>) -> Result<Self, Error> {
-        let timestamp = timestamp_as_u32()?;
+    /// Serializes the command into a byte array.
+    ///
+    /// # Parameters
+    ///
+    /// * `buffer` - The buffer to write the serialized command to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IO operations fail (`Error::Io`)
+    fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+        CommandHeader::new(
+            self.crc,
+            self.timestamp,
+            self.key.len() as u32,
+            self.value.len() as u32,
+        )
+        .serialize(buffer)?;
+        buffer.write_all(&self.key)?;
+        buffer.write_all(&self.value)?;
+        Ok(())
+    }
+}
+
+impl CommandRemove {
+    /// Creates a new remove command.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to remove
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * System time operations fail (`Error::TimestampError`)
+    /// * Timestamp conversion fails (`Error::TimestampOverflow`)
+    pub fn new(key: Vec<u8>) -> Result<Self, Error> {
+        let timestamp = timestamp_as_u64()?;
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(key.as_slice());
         let crc = hasher.finalize();
 
-        Ok(Self::Remove {
+        Ok(Self {
             crc,
             timestamp,
             key,
         })
     }
 
-    /// Serialize the command into a byte array.
+    /// Serializes the command into a byte array.
+    ///
+    /// # Parameters
+    ///
+    /// * `buffer` - The buffer to write the serialized command to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IO operations fail (`Error::Io`)
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
-        match self {
-            Self::Set {
-                crc,
-                timestamp,
-                key,
-                value,
-            } => {
-                let header =
-                    CommandHeader::new(*crc, *timestamp, key.len() as u32, value.len() as u32);
-                header.serialize(buffer)?;
-                buffer.write_all(key)?;
-                buffer.write_all(value)?;
-            }
-            Self::Remove {
-                crc,
-                timestamp,
-                key,
-            } => {
-                let header = CommandHeader::new(*crc, *timestamp, key.len() as u32, 0);
-                header.serialize(buffer)?;
-                buffer.write_all(key)?;
-            }
-        }
+        CommandHeader::new(self.crc, self.timestamp, self.key.len() as u32, 0).serialize(buffer)?;
+        buffer.write_all(&self.key)?;
         Ok(())
-    }
-
-    /// Deserialize the command from a byte array.
-    fn deserialize(buf: &[u8]) -> Result<Self, Error> {
-        let header = CommandHeader::deserialize(buf)?;
-        let key_start = CommandHeader::SIZE;
-        let key_end = key_start + header.key_len as usize;
-
-        let key = buf[key_start..key_end].to_vec();
-
-        if header.value_size == 0 {
-            Ok(Self::Remove {
-                crc: header.crc,
-                timestamp: header.timestamp,
-                key,
-            })
-        } else {
-            let value_end = key_end + header.value_size as usize;
-            let value = buf[key_end..value_end].to_vec();
-
-            Ok(Self::Set {
-                crc: header.crc,
-                timestamp: header.timestamp,
-                key,
-                value,
-            })
-        }
     }
 }
 
-fn file_active_log_path(path: impl AsRef<Path>, timestamp: u32) -> PathBuf {
+/// Constructs the path for an active log file.
+///
+/// # Parameters
+///
+/// * `path` - Base directory path
+/// * `timestamp` - Timestamp used as file identifier
+///
+/// # Returns
+///
+/// Returns a `PathBuf` containing the full path to the active log file
+fn file_active_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.active.log", timestamp))
 }
 
-fn file_log_path(path: impl AsRef<Path>, timestamp: u32) -> PathBuf {
+/// Constructs the path for a regular log file.
+///
+/// # Parameters
+///
+/// * `path` - Base directory path
+/// * `timestamp` - Timestamp used as file identifier
+///
+/// # Returns
+///
+/// Returns a `PathBuf` containing the full path to the log file
+fn file_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.log", timestamp))
 }
 
-fn timestamp_as_u32() -> Result<u32, Error> {
+/// Gets current timestamp as milliseconds since UNIX epoch.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// * System time operations fail (`Error::TimestampError`)
+/// * Milliseconds value doesn't fit in u64 (`Error::TimestampOverflow`)
+fn timestamp_as_u64() -> Result<u64, Error> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(Error::TimestampError)?
-        .as_secs()
+        .as_millis()
         .try_into()
         .map_err(Error::TimestampOverflow)
 }
@@ -511,84 +708,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_set_serialization() {
-        let command = Command::set(b"key".to_vec(), b"value".to_vec()).unwrap();
+    fn test_set_command_serialization() {
+        let key = b"key".to_vec();
+        let value = b"value".to_vec();
+        let command = CommandSet::new(key.clone(), value.clone()).unwrap();
 
-        // Extract original values before serialization
-        let Command::Set {
-            crc,
-            timestamp,
-            ref key,
-            ref value,
-        } = command
-        else {
-            panic!("Expected Set command");
-        };
-
-        // Serialize and deserialize
         let mut buffer = Vec::new();
         command.serialize(&mut buffer).unwrap();
-        let deserialized = Command::deserialize(&buffer).unwrap();
 
-        // Compare with deserialized
-        match deserialized {
-            Command::Set {
-                crc: crc2,
-                timestamp: ts2,
-                key: key2,
-                value: value2,
-            } => {
-                assert_eq!(crc, crc2);
-                assert_eq!(timestamp, ts2);
-                assert_eq!(*key, key2);
-                assert_eq!(*value, value2);
+        // Check header structure
+        let header = CommandHeader::deserialize(&buffer[..CommandHeader::SIZE]).unwrap();
+        assert_eq!(header.key_len, key.len() as u32);
+        assert_eq!(header.value_size, value.len() as u32);
 
-                // Verify CRC is correct
-                let mut hasher = crc32fast::Hasher::new();
-                hasher.update(key);
-                hasher.update(value);
-                assert_eq!(crc, hasher.finalize());
-            }
-            Command::Remove { .. } => panic!("Expected Set command"),
-        }
+        // Check key and value bytes
+        assert_eq!(
+            &buffer[CommandHeader::SIZE..CommandHeader::SIZE + key.len()],
+            key
+        );
+        assert_eq!(&buffer[CommandHeader::SIZE + key.len()..], value);
+
+        // Verify CRC
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&key);
+        hasher.update(&value);
+        assert_eq!(header.crc, hasher.finalize());
     }
 
     #[test]
-    fn test_remove_serialization() {
-        let command = Command::remove(b"key".to_vec()).unwrap();
+    fn test_remove_command_serialization() {
+        let key = b"key".to_vec();
+        let command = CommandRemove::new(key.clone()).unwrap();
 
-        // Extract original values
-        let Command::Remove {
-            crc,
-            timestamp,
-            ref key,
-        } = command
-        else {
-            panic!("Expected Remove command");
-        };
-
-        // Serialize and deserialize
         let mut buffer = Vec::new();
         command.serialize(&mut buffer).unwrap();
-        let deserialized = Command::deserialize(&buffer).unwrap();
 
-        // Compare with deserialized
-        match deserialized {
-            Command::Remove {
-                crc: crc2,
-                timestamp: ts2,
-                key: key2,
-            } => {
-                assert_eq!(crc, crc2);
-                assert_eq!(timestamp, ts2);
-                assert_eq!(*key, key2);
+        // Check header structure
+        let header = CommandHeader::deserialize(&buffer[..CommandHeader::SIZE]).unwrap();
+        assert_eq!(header.key_len, key.len() as u32);
+        assert_eq!(header.value_size, 0);
 
-                // Verify CRC is correct
-                let mut hasher = crc32fast::Hasher::new();
-                hasher.update(key);
-                assert_eq!(crc, hasher.finalize());
-            }
-            Command::Set { .. } => panic!("Expected Remove command"),
-        }
+        // Check key bytes
+        assert_eq!(&buffer[CommandHeader::SIZE..], key);
+
+        // Verify CRC
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&key);
+        assert_eq!(header.crc, hasher.finalize());
     }
 }
