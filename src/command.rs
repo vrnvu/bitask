@@ -1,6 +1,9 @@
 use std::env;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+
+use crate::db;
 
 /// bitask cli
 #[derive(Parser, Debug)]
@@ -47,12 +50,20 @@ impl Bitask {
         }
         env_logger::init();
 
+        let db_path = env::var("BITASK_PATH")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("BITASK_PATH environment variable is required"))?;
+
+        let mut db = db::Bitask::open(&db_path)?;
+
         match self.command {
             Command::Ask { key } => {
-                println!("Asking for key: {}", key);
+                let value = db.ask(key.as_bytes())?;
+                println!("{}", String::from_utf8_lossy(&value));
             }
             Command::Put { key, value } => {
-                println!("Putting key: {} with value: {}", key, value);
+                db.put(key.as_bytes().to_vec(), value.as_bytes().to_vec())?;
+                println!("Value stored successfully");
             }
         }
 

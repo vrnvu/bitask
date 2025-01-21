@@ -702,6 +702,15 @@ fn timestamp_as_u64() -> Result<u64, Error> {
         .map_err(Error::TimestampOverflow)
 }
 
+impl Drop for Bitask {
+    fn drop(&mut self) {
+        // Remove the physical lock file from the filesystem
+        if let Ok(path) = self.path.join("db.lock").canonicalize() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
