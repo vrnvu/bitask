@@ -68,6 +68,7 @@ const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// - Process-safe file locking
 /// - Append-only log structure
 /// - In-memory key directory
+/// - Automatic log rotation at 4MB
 ///
 /// # Examples
 ///
@@ -90,6 +91,17 @@ const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # File Structure
+/// - Active file: `<timestamp>.active.log` - Current file being written to
+/// - Sealed files: `<timestamp>.log` - Immutable files after rotation
+/// - Lock file: `db.lock` - Ensures single-writer access
+///
+/// # Log Rotation
+/// Files are automatically rotated when they reach 4MB in size. When rotation occurs:
+/// 1. Current active file is renamed from `.active.log` to `.log`
+/// 2. New active file is created with current timestamp
+/// 3. All existing data remains accessible
 #[derive(Debug)]
 pub struct Bitask {
     path: PathBuf,
