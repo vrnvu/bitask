@@ -102,3 +102,42 @@ fn test_invalid_empty_key_and_empty_value() -> anyhow::Result<()> {
     ));
     Ok(())
 }
+
+#[test]
+fn test_rebuild_keydir_on_open() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+    db.put(b"key1".to_vec(), b"value1".to_vec())?;
+    db.put(b"key2".to_vec(), b"value2".to_vec())?;
+    drop(db);
+
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+    let value = db.ask(b"key1")?;
+    assert_eq!(value, b"value1");
+
+    let value = db.ask(b"key2")?;
+    assert_eq!(value, b"value2");
+    Ok(())
+}
+
+#[test]
+fn test_rebuild_keydir_on_open_with_remove() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+    db.put(b"key1".to_vec(), b"value1".to_vec())?;
+    db.put(b"key2".to_vec(), b"value2".to_vec())?;
+    db.remove(b"key1".to_vec())?;
+    drop(db);
+
+    let mut db = bitask::db::Bitask::open(temp.path())?;
+    let value = db.ask(b"key1");
+    assert!(value.is_err());
+    assert!(matches!(
+        value.err().unwrap(),
+        bitask::db::Error::KeyNotFound
+    ));
+
+    let value = db.ask(b"key2")?;
+    assert_eq!(value, b"value2");
+    Ok(())
+}

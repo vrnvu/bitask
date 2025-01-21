@@ -9,6 +9,16 @@ use fs2::FileExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Invalid log file name '{filename}'. Expected format: 'timestamp.log' or 'timestamp.active.log'")]
+    InvalidLogFileName { filename: String },
+
+    #[error("Failed to parse timestamp '{value}' from log filename: {source}")]
+    TimestampParse {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Only one writer allowed at a time")]
@@ -25,6 +35,8 @@ pub enum Error {
     TimestampError(#[from] std::time::SystemTimeError),
     #[error("Timestamp overflow, converting u64 to u32: {0}")]
     TimestampOverflow(#[from] std::num::TryFromIntError),
+    #[error("Active file not found in non empty path")]
+    ActiveFileNotFound,
 }
 
 /// A Bitask database.
@@ -34,8 +46,12 @@ pub enum Error {
 pub struct Bitask {
     path: PathBuf,
     file_lock: File,
+
+    writer_id: u32,
     writer: BufWriter<File>,
+
     readers: HashMap<u32, BufReader<File>>,
+
     keydir: BTreeMap<Vec<u8>, KeyDirEntry>,
 }
 
@@ -43,7 +59,7 @@ struct KeyDirEntry {
     file_id: u32,
     value_size: u32,
     value_position: u64,
-    timestamp: u64,
+    timestamp: u32,
 }
 
 impl Bitask {
@@ -66,20 +82,170 @@ impl Bitask {
             .try_lock_exclusive()
             .map_err(|_| Error::WriterLock)?;
 
-        let active_file = OpenOptions::new()
+        let is_empty = match fs::read_dir(&path)?.next() {
+            None => true,
+            Some(Ok(entry)) if entry.file_name() == "db.lock" => {
+                // If first entry is db.lock, check if there's a second entry
+                fs::read_dir(&path)?.nth(1).is_none()
+            }
+            Some(_) => false,
+        };
+
+        if is_empty {
+            Self::open_new(path, lock_file)
+        } else {
+            Self::open_existing(path, lock_file)
+        }
+    }
+
+    fn open_new(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
+        let timestamp = timestamp_as_u32()?;
+
+        let writer_file = OpenOptions::new()
             .create(true)
             .read(true)
             .truncate(false)
             .append(true)
-            .open(path.as_ref().join("0.log"))?;
+            .open(file_active_log_path(path.as_ref(), timestamp))?;
+
+        let reader_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .append(true)
+            .open(file_active_log_path(path.as_ref(), timestamp))?;
+
+        let writer = BufWriter::new(writer_file);
+        let mut readers = HashMap::new();
+        let reader = BufReader::new(reader_file);
+        readers.insert(timestamp, reader);
 
         Ok(Self {
             path: path.as_ref().to_path_buf(),
             file_lock: lock_file,
-            writer: BufWriter::new(active_file),
-            readers: HashMap::new(),
+            writer_id: timestamp,
+            writer,
+            readers,
             keydir: BTreeMap::new(),
         })
+    }
+
+    fn open_existing(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
+        let mut active_timestamp = None;
+        let mut active_file = None;
+        let mut files: BTreeMap<u32, PathBuf> = BTreeMap::new();
+
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "db.lock" {
+                continue;
+            }
+
+            let timestamp = name
+                .split('.')
+                .next()
+                .ok_or_else(|| Error::InvalidLogFileName {
+                    filename: name.to_string(),
+                })?
+                .parse()
+                .map_err(|e| Error::TimestampParse {
+                    value: name.to_string(),
+                    source: e,
+                })?;
+
+            if name.ends_with(".active.log") {
+                active_file = Some(entry.path());
+                active_timestamp = Some(timestamp);
+            } else if name.ends_with(".log") {
+                files.insert(timestamp, entry.path());
+            }
+        }
+
+        let active_timestamp = active_timestamp.ok_or(Error::ActiveFileNotFound)?;
+
+        let writer = {
+            let active_file = active_file.clone().ok_or(Error::ActiveFileNotFound)?;
+            let writer_file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .truncate(false)
+                .append(true)
+                .open(active_file)?;
+            BufWriter::new(writer_file)
+        };
+
+        let mut reader = {
+            let active_file = active_file.ok_or(Error::ActiveFileNotFound)?;
+
+            let reader_file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .truncate(false)
+                .append(true)
+                .open(active_file)?;
+            BufReader::new(reader_file)
+        };
+
+        let keydir = Self::rebuild_keydir(&mut reader)?;
+
+        let mut readers = HashMap::new();
+        readers.insert(active_timestamp, reader);
+
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+            file_lock: lock_file,
+            writer_id: active_timestamp,
+            writer,
+            readers,
+            keydir,
+        })
+    }
+
+    fn rebuild_keydir(
+        reader: &mut BufReader<File>,
+    ) -> Result<BTreeMap<Vec<u8>, KeyDirEntry>, Error> {
+        let mut keydir = BTreeMap::new();
+        let mut position = 0u64;
+        loop {
+            // Read header (16 bytes total)
+            let mut header = [0u8; 16];
+            match reader.read_exact(&mut header) {
+                Ok(_) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            let crc = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            let timestamp = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let key_len = u32::from_le_bytes(header[8..12].try_into().unwrap());
+            let value_len = u32::from_le_bytes(header[12..16].try_into().unwrap());
+
+            // Read key
+            let mut key = vec![0u8; key_len as usize];
+            reader.read_exact(&mut key)?;
+
+            if value_len == 0 {
+                // Remove command - delete from keydir
+                keydir.remove(&key);
+            } else {
+                // Set command - add to keydir and skip value
+                let value_position = position + 16 + key_len as u64;
+                keydir.insert(
+                    key,
+                    KeyDirEntry {
+                        file_id: timestamp,
+                        value_size: value_len,
+                        value_position,
+                        timestamp,
+                    },
+                );
+                reader.seek(SeekFrom::Current(value_len as i64))?;
+            }
+
+            position += 16 + key_len as u64 + value_len as u64;
+        }
+        Ok(keydir)
     }
 
     pub fn ask(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
@@ -98,7 +264,7 @@ impl Bitask {
             let reader = self
                 .readers
                 .get_mut(&entry.file_id)
-                .ok_or(Error::FileNotFound(format!("{}.log", entry.file_id)))?;
+                .ok_or(Error::FileNotFound(format!("{}", entry.file_id)))?;
 
             reader.seek(SeekFrom::Start(entry.value_position))?;
             // TODO buffer pool
@@ -134,10 +300,10 @@ impl Bitask {
         self.keydir.insert(
             key,
             KeyDirEntry {
-                file_id: 0,
+                file_id: self.writer_id,
                 value_size: value.len() as u32,
                 value_position,
-                timestamp: 0,
+                timestamp: command.timestamp(),
             },
         );
         Ok(())
@@ -182,6 +348,14 @@ enum Command {
 }
 
 impl Command {
+    /// Get the timestamp of the command.
+    pub fn timestamp(&self) -> u32 {
+        match self {
+            Self::Set { timestamp, .. } => *timestamp,
+            Self::Remove { timestamp, .. } => *timestamp,
+        }
+    }
+
     /// Create a new set command.
     pub fn set(key: Vec<u8>, value: Vec<u8>) -> Result<Self, Error> {
         let timestamp = timestamp_as_u32()?;
@@ -290,6 +464,14 @@ impl Command {
             })
         }
     }
+}
+
+fn file_active_log_path(path: impl AsRef<Path>, timestamp: u32) -> PathBuf {
+    path.as_ref().join(format!("{}.active.log", timestamp))
+}
+
+fn file_log_path(path: impl AsRef<Path>, timestamp: u32) -> PathBuf {
+    path.as_ref().join(format!("{}.log", timestamp))
 }
 
 fn timestamp_as_u32() -> Result<u32, Error> {
