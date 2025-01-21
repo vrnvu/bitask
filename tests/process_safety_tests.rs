@@ -9,14 +9,14 @@ fn test_concurrent_processes_access() -> anyhow::Result<()> {
 
     // First process writes data
     let output = Command::new("cargo")
-        .args(&["run", "--", "put", "--key", "foo", "--value", "bar"])
+        .args(["run", "--", "put", "--key", "foo", "--value", "bar"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
     assert!(output.status.success());
 
     // Second process reads data
     let output = Command::new("cargo")
-        .args(&["run", "--", "ask", "--key", "foo"])
+        .args(["run", "--", "ask", "--key", "foo"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
 
@@ -36,7 +36,7 @@ fn test_process_lock_contention() -> anyhow::Result<()> {
 
     // Try to write using CLI, should fail due to lock
     let output = Command::new("cargo")
-        .args(&["run", "--", "put", "--key", "foo", "--value", "bar"])
+        .args(["run", "--", "put", "--key", "foo", "--value", "bar"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
 
@@ -52,14 +52,14 @@ fn test_process_recovery_after_crash() -> anyhow::Result<()> {
 
     // Write initial data
     let output = Command::new("cargo")
-        .args(&["run", "--", "put", "--key", "foo", "--value", "bar"])
+        .args(["run", "--", "put", "--key", "foo", "--value", "bar"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
     assert!(output.status.success());
 
     // Start a long-running CLI operation that we'll interrupt
     let mut child = Command::new("cargo")
-        .args(&["run", "--", "put", "--key", "foo2", "--value", "bar2"])
+        .args(["run", "--", "put", "--key", "foo2", "--value", "bar2"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .spawn()?;
 
@@ -69,7 +69,7 @@ fn test_process_recovery_after_crash() -> anyhow::Result<()> {
 
     // Database should still be readable
     let output = Command::new("cargo")
-        .args(&["run", "--", "ask", "--key", "foo"])
+        .args(["run", "--", "ask", "--key", "foo"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
 
@@ -87,7 +87,7 @@ fn test_lock_file_cleanup() -> anyhow::Result<()> {
 
     // Run a put command
     let output = Command::new("cargo")
-        .args(&["run", "--", "put", "--key", "foo", "--value", "bar"])
+        .args(["run", "--", "put", "--key", "foo", "--value", "bar"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
 
@@ -101,7 +101,7 @@ fn test_lock_file_cleanup() -> anyhow::Result<()> {
 
     // Try reading the value back
     let output = Command::new("cargo")
-        .args(&["run", "--", "ask", "--key", "foo"])
+        .args(["run", "--", "ask", "--key", "foo"])
         .env("BITASK_PATH", db_path.to_str().unwrap())
         .output()?;
 
