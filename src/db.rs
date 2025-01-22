@@ -91,6 +91,10 @@ pub enum Error {
     /// No active file found when opening existing database
     #[error("Active file not found in non empty path")]
     ActiveFileNotFound,
+
+    /// Invalid data deserialization encountered
+    #[error("Invalid data deserialization: {0}")]
+    InvalidDataDeserialize(#[from] std::array::TryFromSliceError),
 }
 
 /// The name of the file lock. Used to ensure only one writer at a time and process safety.
@@ -861,11 +865,16 @@ impl CommandHeader {
             )));
         }
 
+        let crc = u32::from_le_bytes(buf[0..4].try_into()?);
+        let timestamp = u64::from_le_bytes(buf[4..12].try_into()?);
+        let key_len = u32::from_le_bytes(buf[12..16].try_into()?);
+        let value_size = u32::from_le_bytes(buf[16..20].try_into()?);
+
         Ok(Self {
-            crc: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-            timestamp: u64::from_le_bytes(buf[4..12].try_into().unwrap()),
-            key_len: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            value_size: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+            crc,
+            timestamp,
+            key_len,
+            value_size,
         })
     }
 }
