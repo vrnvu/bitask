@@ -632,7 +632,6 @@ impl Bitask {
         let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
-        // TODO optimize writer to store last offset/position
         let position = self.writer.seek(SeekFrom::End(0))?;
         self.writer.write_all(&buffer)?;
         self.writer.flush()?;
