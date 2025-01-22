@@ -1,6 +1,6 @@
 [package]
 name = "bitask"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Bitask is a Rust implementation of Bitcask, a log-structured key-value store optimized for high-performance reads and writes."
 authors = ["Arnau <arnaudiaz@duck.com>"]
