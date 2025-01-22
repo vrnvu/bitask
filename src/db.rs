@@ -190,14 +190,14 @@ impl Bitask {
     ///
     /// # Returns
     ///
-    /// Returns a new `Bitask` instance if successful.
+    /// Returns a new [`Bitask`] instance if successful.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * Another process has write access (`Error::WriterLock`)
-    /// * Filesystem operations fail (`Error::Io`)
-    /// * No active file is found when opening existing DB (`Error::ActiveFileNotFound`)
+    /// Returns an [`Error`] if:
+    /// * Another process has write access ([`Error::WriterLock`])
+    /// * Filesystem operations fail ([`Error::Io`])
+    /// * No active file is found when opening existing DB ([`Error::ActiveFileNotFound`])
     ///
     /// # Examples
     ///
@@ -246,13 +246,13 @@ impl Bitask {
     ///
     /// # Returns
     ///
-    /// Returns a new `Bitask` instance if successful.
+    /// Returns a new [`Bitask`] instance if successful.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * Filesystem operations fail (`Error::Io`)
-    /// * System time operations fail (`Error::TimestampError`)
+    /// Returns an [`Error`] if:
+    /// * Filesystem operations fail ([`Error::Io`])
+    /// * System time operations fail ([`Error::TimestampError`])
     fn open_new(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
         let timestamp = timestamp_as_u64()?;
 
@@ -294,15 +294,15 @@ impl Bitask {
     ///
     /// # Returns
     ///
-    /// Returns a `Bitask` instance initialized with the existing database state.
+    /// Returns a [`Bitask`] instance initialized with the existing database state.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * Filesystem operations fail (`Error::Io`)
-    /// * Log file names are malformed (`Error::InvalidLogFileName`)
-    /// * Timestamps in filenames are invalid (`Error::TimestampParse`)
-    /// * No active log file exists (`Error::ActiveFileNotFound`)
+    /// Returns an [`Error`] if:
+    /// * Filesystem operations fail ([`Error::Io`])
+    /// * Log file names are malformed ([`Error::InvalidLogFileName`])
+    /// * Timestamps in filenames are invalid ([`Error::TimestampParse`])
+    /// * No active log file exists ([`Error::ActiveFileNotFound`])
     fn open_existing(path: impl AsRef<Path>, lock_file: File) -> Result<Self, Error> {
         let mut active_timestamp = None;
         let mut active_file = None;
@@ -389,12 +389,12 @@ impl Bitask {
     ///
     /// # Returns
     ///
-    /// Returns a BTreeMap containing the rebuilt key directory mapping keys to their latest positions
+    /// Returns a [`BTreeMap`] containing the rebuilt key directory mapping keys to their latest positions
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * IO operations fail while reading the file
+    /// Returns an [`Error`] if:
+    /// * IO operations fail while reading the file ([`Error::Io`])
     /// * Log file contains invalid or corrupted data
     fn rebuild_keydir(
         reader: &mut BufReader<File>,
@@ -509,15 +509,15 @@ impl Bitask {
     ///
     /// # Returns
     ///
-    /// Returns the value as a byte vector if the key exists.
+    /// Returns the value as a [`Vec<u8>`] if the key exists.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * The key is empty (`Error::InvalidEmptyKey`)
-    /// * The key doesn't exist (`Error::KeyNotFound`)
-    /// * The data file is missing (`Error::FileNotFound`)
-    /// * IO operations fail (`Error::Io`)
+    /// Returns an [`Error`] if:
+    /// * The key is empty ([`Error::InvalidEmptyKey`])
+    /// * The key doesn't exist ([`Error::KeyNotFound`])
+    /// * The data file is missing ([`Error::FileNotFound`])
+    /// * IO operations fail ([`Error::Io`])
     ///
     /// # Examples
     ///
@@ -575,10 +575,10 @@ impl Bitask {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * The key is empty (`Error::InvalidEmptyKey`)
-    /// * The value is empty (`Error::InvalidEmptyValue`)
-    /// * IO operations fail (`Error::Io`)
+    /// Returns an [`Error`] if:
+    /// * The key is empty ([`Error::InvalidEmptyKey`])
+    /// * The value is empty ([`Error::InvalidEmptyValue`])
+    /// * IO operations fail ([`Error::Io`])
     ///
     /// # Examples
     ///
@@ -664,9 +664,9 @@ impl Bitask {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * The key is empty (`Error::InvalidEmptyKey`)
-    /// * IO operations fail (`Error::Io`)
+    /// Returns an [`Error`] if:
+    /// * The key is empty ([`Error::InvalidEmptyKey`])
+    /// * IO operations fail ([`Error::Io`])
     ///
     /// # Examples
     ///
@@ -708,9 +708,9 @@ impl Bitask {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * IO operations fail (`Error::Io`)
-    /// * File operations fail (`Error::FileNotFound`)
+    /// Returns an [`Error`] if:
+    /// * IO operations fail ([`Error::Io`])
+    /// * File operations fail ([`Error::FileNotFound`])
     ///
     /// # Examples
     ///
@@ -805,7 +805,7 @@ impl CommandHeader {
     ///
     /// # Returns
     ///
-    /// Returns a new `CommandHeader` initialized with the provided values
+    /// Returns a new [`CommandHeader`] initialized with the provided values
     fn new(crc: u32, timestamp: u64, key_len: u32, value_len: u32) -> Self {
         Self {
             crc,
@@ -829,7 +829,7 @@ impl CommandHeader {
     ///
     /// # Errors
     ///
-    /// Returns `Error::Io` if writing to the buffer fails
+    /// Returns [`Error::Io`] if writing to the buffer fails
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         buffer.write_all(&self.crc.to_le_bytes())?;
         buffer.write_all(&self.timestamp.to_le_bytes())?;
@@ -842,12 +842,12 @@ impl CommandHeader {
     ///
     /// # Arguments
     ///
-    /// * `buf` - Buffer containing the serialized header data (must be at least `SIZE` bytes)
+    /// * `buf` - Buffer containing the serialized header data (must be at least [`Self::SIZE`] bytes)
     ///
     /// # Errors
     ///
-    /// Returns `Error::Io` if:
-    /// * The buffer is smaller than `SIZE` bytes
+    /// Returns [`Error::Io`] if:
+    /// * The buffer is smaller than [`Self::SIZE`] bytes
     /// * The buffer contains invalid data that can't be converted to header fields
     ///
     /// # Panics
@@ -877,9 +877,9 @@ struct CommandSet {
     crc: u32,
     /// Timestamp when command was created (milliseconds since UNIX epoch)
     timestamp: u64,
-    /// Key to be stored
+    /// Key to be stored as [`Vec<u8>`]
     key: Vec<u8>,
-    /// Value to be associated with the key
+    /// Value to be associated with the key as [`Vec<u8>`]
     value: Vec<u8>,
 }
 
@@ -890,7 +890,7 @@ struct CommandRemove {
     crc: u32,
     /// Timestamp when command was created (milliseconds since UNIX epoch)
     timestamp: u64,
-    /// Key to be removed
+    /// Key to be removed as [`Vec<u8>`]
     key: Vec<u8>,
 }
 
@@ -901,14 +901,18 @@ impl CommandSet {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to store
-    /// * `value` - The value to associate with the key
+    /// * `key` - The key to store as [`Vec<u8>`]
+    /// * `value` - The value to associate with the key as [`Vec<u8>`]
+    ///
+    /// # Returns
+    ///
+    /// Returns a new [`CommandSet`] if successful.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * System time operations fail (`Error::TimestampError`)
-    /// * Timestamp conversion fails (`Error::TimestampOverflow`)
+    /// Returns an [`Error`] if:
+    /// * System time operations fail ([`Error::TimestampError`])
+    /// * Timestamp conversion fails ([`Error::TimestampOverflow`])
     pub fn new(key: Vec<u8>, value: Vec<u8>) -> Result<Self, Error> {
         let timestamp = timestamp_as_u64()?;
 
@@ -934,11 +938,11 @@ impl CommandSet {
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer to write the serialized command to
+    /// * `buffer` - The buffer to write the serialized command to as [`Vec<u8>`]
     ///
     /// # Errors
     ///
-    /// Returns an error if IO operations fail (`Error::Io`)
+    /// Returns an [`Error::Io`] if IO operations fail
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         CommandHeader::new(
             self.crc,
@@ -960,13 +964,17 @@ impl CommandRemove {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to remove
+    /// * `key` - The key to remove as [`Vec<u8>`]
+    ///
+    /// # Returns
+    ///
+    /// Returns a new [`CommandRemove`] if successful.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * System time operations fail (`Error::TimestampError`)
-    /// * Timestamp conversion fails (`Error::TimestampOverflow`)
+    /// Returns an [`Error`] if:
+    /// * System time operations fail ([`Error::TimestampError`])
+    /// * Timestamp conversion fails ([`Error::TimestampOverflow`])
     pub fn new(key: Vec<u8>) -> Result<Self, Error> {
         let timestamp = timestamp_as_u64()?;
 
@@ -989,11 +997,11 @@ impl CommandRemove {
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer to write the serialized command to
+    /// * `buffer` - The buffer to write the serialized command to as [`Vec<u8>`]
     ///
     /// # Errors
     ///
-    /// Returns an error if IO operations fail (`Error::Io`)
+    /// Returns an [`Error::Io`] if IO operations fail
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         CommandHeader::new(self.crc, self.timestamp, self.key.len() as u32, 0).serialize(buffer)?;
         buffer.write_all(&self.key)?;
@@ -1010,7 +1018,7 @@ impl CommandRemove {
 ///
 /// # Returns
 ///
-/// Returns a `PathBuf` containing the full path to the active log file in format:
+/// Returns a [`PathBuf`] containing the full path to the active log file in format:
 /// `<path>/<timestamp>.active.log`
 fn file_active_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.active.log", timestamp))
@@ -1025,7 +1033,7 @@ fn file_active_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
 ///
 /// # Returns
 ///
-/// Returns a `PathBuf` containing the full path to the log file in format:
+/// Returns a [`PathBuf`] containing the full path to the log file in format:
 /// `<path>/<timestamp>.log`
 fn file_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.log", timestamp))
@@ -1035,13 +1043,13 @@ fn file_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
 ///
 /// # Returns
 ///
-/// Returns the current time in milliseconds since UNIX epoch as a u64
+/// Returns the current time in milliseconds since UNIX epoch as [`u64`]
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// * System time operations fail (`Error::TimestampError`)
-/// * Milliseconds value doesn't fit in u64 (`Error::TimestampOverflow`)
+/// Returns an [`Error`] if:
+/// * System time operations fail ([`Error::TimestampError`])
+/// * Milliseconds value doesn't fit in [`u64`] ([`Error::TimestampOverflow`])
 fn timestamp_as_u64() -> Result<u64, Error> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
