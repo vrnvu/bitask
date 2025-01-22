@@ -77,3 +77,28 @@ assert!(matches!(another_db.err().unwrap(), bitask::db::Error::WriterLock));
 - All keys must fit in memory
 - Single writer at a time
 - No multi-key transactions
+
+## Comparison with other databases
+
+| Feature | Bitask | LevelDB | RocksDB | LMDB | BadgerDB |
+|:--------|:-------|:---------|:---------|:------|:----------|
+| **Architecture** | Log-structured | LSM-tree | LSM-tree | B+ tree | LSM-tree |
+| **Write Amplification** | Medium-High (immediate fsync) | Medium (configurable) | Low-Medium (configurable) | Low | Medium |
+| **Read Performance** | O(1) with in-memory index | O(log N) | O(log N) | O(log N) | O(log N) |
+| **Write Performance** | High (sequential) | High | Very High | Medium | High |
+| **Space Amplification** | High until compaction | Medium | Medium | Low | Medium |
+| **Compression** | No | Yes | Yes | No | Yes |
+| **Transactions** | No | No | Yes | Yes | Yes |
+| **Concurrent Readers** | Yes | Yes | Yes | Yes | Yes |
+| **Concurrent Writers** | No | Yes | Yes | Yes | Yes |
+| **Memory Usage** | All keys in RAM | Configurable | Configurable | Configurable | Configurable |
+| **Max DB Size** | Limited by disk | Limited by disk | Limited by disk | Limited by disk | Limited by disk |
+| **Language** | Rust | C++ | C++ | C | Go |
+| **Checksums** | CRC32 | CRC32 | CRC32 | No | CRC32 |
+| **Compaction** | Manual | Automatic | Automatic | Not needed | Automatic |
+| **Recovery** | Log replay | Log + MANIFEST | Log + MANIFEST | ACID | Log + MANIFEST |
+| **Bloom Filters** | No | Yes | Yes | No | Yes |
+| **Column Families** | No | No | Yes | Yes | Yes |
+| **Snapshots** | Yes (timestamp-based) | Yes | Yes | Yes | Yes |
+| **Snapshot Guarantees** | Available until compaction | Available until explicitly released | Available until explicitly released | MVCC always available | Available until explicitly released |
+| **Backup/Restore** | Yes (file copy) | Yes (API) | Yes (API) | Yes | Yes |
