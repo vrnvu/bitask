@@ -628,8 +628,14 @@ impl Bitask {
             }
         }
 
+        // Pre-allocate a single buffer for the entire command
+        let total_size = CommandHeader::SIZE + key.len() + value.len();
+        let mut buffer = Vec::with_capacity(total_size);
+        buffer.extend_from_slice(&[0; CommandHeader::SIZE]);
+        buffer.extend_from_slice(&key);
+        buffer.extend_from_slice(&value);
+
         let command = CommandSet::new(key.clone(), value.clone())?;
-        let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
         let position = self.writer.seek(SeekFrom::End(0))?;
@@ -682,8 +688,13 @@ impl Bitask {
             return Err(Error::InvalidEmptyKey);
         }
 
+        // Pre-allocate buffer for remove command
+        let total_size = CommandHeader::SIZE + key.len();
+        let mut buffer = Vec::with_capacity(total_size);
+        buffer.extend_from_slice(&[0; CommandHeader::SIZE]);
+        buffer.extend_from_slice(&key);
+
         let command = CommandRemove::new(key.clone())?;
-        let mut buffer = Vec::new();
         command.serialize(&mut buffer)?;
 
         self.writer.write_all(&buffer)?;
@@ -843,11 +854,19 @@ impl CommandHeader {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if writing to the buffer fails
-    fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
-        buffer.write_all(&self.crc.to_le_bytes())?;
-        buffer.write_all(&self.timestamp.to_le_bytes())?;
-        buffer.write_all(&self.key_len.to_le_bytes())?;
-        buffer.write_all(&self.value_size.to_le_bytes())?;
+    fn serialize(&self, buffer: &mut [u8]) -> Result<(), Error> {
+        // Verify buffer has enough space
+        if buffer.len() < Self::SIZE {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "buffer too small for header",
+            )));
+        }
+
+        buffer[0..4].copy_from_slice(&self.crc.to_le_bytes());
+        buffer[4..12].copy_from_slice(&self.timestamp.to_le_bytes());
+        buffer[12..16].copy_from_slice(&self.key_len.to_le_bytes());
+        buffer[16..20].copy_from_slice(&self.value_size.to_le_bytes());
         Ok(())
     }
 
@@ -961,16 +980,29 @@ impl CommandSet {
     /// # Errors
     ///
     /// Returns an [`Error::Io`] if IO operations fail
-    fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+    fn serialize(&self, buffer: &mut [u8]) -> Result<(), Error> {
+        let total_size = CommandHeader::SIZE + self.key.len() + self.value.len();
+        if buffer.len() < total_size {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "buffer too small for command",
+            )));
+        }
+
+        // Write header
         CommandHeader::new(
             self.crc,
             self.timestamp,
             self.key.len() as u32,
             self.value.len() as u32,
         )
-        .serialize(buffer)?;
-        buffer.write_all(&self.key)?;
-        buffer.write_all(&self.value)?;
+        .serialize(&mut buffer[..CommandHeader::SIZE])?;
+
+        // Write key and value
+        buffer[CommandHeader::SIZE..CommandHeader::SIZE + self.key.len()]
+            .copy_from_slice(&self.key);
+        buffer[CommandHeader::SIZE + self.key.len()..total_size].copy_from_slice(&self.value);
+
         Ok(())
     }
 }
@@ -1020,9 +1052,22 @@ impl CommandRemove {
     /// # Errors
     ///
     /// Returns an [`Error::Io`] if IO operations fail
-    fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
-        CommandHeader::new(self.crc, self.timestamp, self.key.len() as u32, 0).serialize(buffer)?;
-        buffer.write_all(&self.key)?;
+    fn serialize(&self, buffer: &mut [u8]) -> Result<(), Error> {
+        let total_size = CommandHeader::SIZE + self.key.len();
+        if buffer.len() < total_size {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "buffer too small for command",
+            )));
+        }
+
+        // Write header
+        CommandHeader::new(self.crc, self.timestamp, self.key.len() as u32, 0)
+            .serialize(&mut buffer[..CommandHeader::SIZE])?;
+
+        // Write key
+        buffer[CommandHeader::SIZE..total_size].copy_from_slice(&self.key);
+
         Ok(())
     }
 }
@@ -1100,7 +1145,7 @@ mod tests {
         let value = b"value".to_vec();
         let command = CommandSet::new(key.clone(), value.clone()).unwrap();
 
-        let mut buffer = Vec::new();
+        let mut buffer = vec![0; CommandHeader::SIZE + key.len() + value.len()];
         command.serialize(&mut buffer).unwrap();
 
         // Check header structure
@@ -1127,7 +1172,7 @@ mod tests {
         let key = b"key".to_vec();
         let command = CommandRemove::new(key.clone()).unwrap();
 
-        let mut buffer = Vec::new();
+        let mut buffer = vec![0; CommandHeader::SIZE + key.len()];
         command.serialize(&mut buffer).unwrap();
 
         // Check header structure

@@ -2,8 +2,6 @@
 mod tests {
     use bitask::db::Bitask;
 
-    use super::*;
-
     #[test]
     fn benchmark_operations() {
         let dir = tempfile::tempdir().unwrap();
