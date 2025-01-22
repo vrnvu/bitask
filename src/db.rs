@@ -354,7 +354,6 @@ impl Bitask {
 
         let mut reader = {
             let active_file = active_file.ok_or(Error::ActiveFileNotFound)?;
-
             let reader_file = OpenOptions::new()
                 .create(true)
                 .read(true)
@@ -725,6 +724,17 @@ impl Bitask {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn compact(&mut self) -> Result<(), Error> {
+        let immutable_files = std::fs::read_dir(&self.path)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.ends_with(".log") && !name.ends_with(".active.log")
+            })
+            .count();
+        if immutable_files < 2 {
+            return Ok(());
+        }
+
         // Create new file for compaction
         let timestamp = timestamp_as_u64()?;
         let mut compaction_writer = BufWriter::new(

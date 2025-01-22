@@ -5,12 +5,12 @@ use clap::{Parser, Subcommand};
 
 use crate::db;
 
-/// bitask cli
+/// Bitask CLI
 #[derive(Parser, Debug)]
 #[clap(
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     author = "Arnau Diaz <arnaudiaz@duck.com>",
-    about = "Bitask is a simple key-value store written in Rust."
+    about = "Bitask is a Rust implementation of Bitcask, a log-structured key-value store optimized for high-performance reads and writes."
 )]
 pub struct Bitask {
     /// Sets logging to "debug" level, defaults to "info"
@@ -23,22 +23,38 @@ pub struct Bitask {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Ask for a value from the store
+    /// Get a value from the store
+    ///
+    /// Returns an error if the key doesn't exist
     Ask {
-        /// sets the key to ask for
+        /// The key to look up
         #[clap(long)]
         key: String,
     },
     /// Put a value into the store
+    ///
+    /// Creates a new entry or updates an existing one
     Put {
-        /// sets the key to put
+        /// The key to store
         #[clap(long)]
         key: String,
 
-        /// sets the value to put
+        /// The value to store
         #[clap(long)]
         value: String,
     },
+    /// Remove a key from the store
+    ///
+    /// Returns success even if the key doesn't exist
+    Remove {
+        /// The key to remove
+        #[clap(long)]
+        key: String,
+    },
+    /// Compact the database
+    ///
+    /// Merges multiple log files into one and removes deleted entries
+    Compact,
 }
 
 impl Bitask {
@@ -63,7 +79,12 @@ impl Bitask {
             }
             Command::Put { key, value } => {
                 db.put(key.as_bytes().to_vec(), value.as_bytes().to_vec())?;
-                println!("Value stored successfully");
+            }
+            Command::Compact => {
+                db.compact()?;
+            }
+            Command::Remove { key } => {
+                db.remove(key.as_bytes().to_vec())?;
             }
         }
 
