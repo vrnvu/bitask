@@ -1,17 +1,17 @@
 # bitask
 
-Bitask is based on Bitcask, a fast, log-structured key-value (KV) store optimized for high-performance reads and writes. Here's the summary in 10 lines:
+Bitask is a Rust implementation of Bitcask, a log-structured key-value store optimized for high-performance reads and writes. Here's the summary in 10 lines:
 
-1. Core Idea: Bitcask uses a log-structured design where writes are appended to immutable logs, ensuring fast and efficient write operations.
-2. Indexing: Keys are stored in memory as a hash table, mapping to their positions in the logs, allowing O(1) lookups.
-3. Data Layout: The storage consists of multiple files—active (for ongoing writes) and sealed files (immutable).
-4. Reads: A lookup finds the key in memory, retrieves its offset, and reads the value from the corresponding log file.
-5. Compaction: Old log files are periodically merged to eliminate stale keys and reclaim disk space.
-6. Crash Recovery: On restart, the index is rebuilt by scanning the log files for keys and their latest values.
-7. Advantages: Fast writes, efficient reads, and a simple design make it ideal for write-heavy workloads.
-8. Challenges: High memory usage for indexing and slower recovery times due to index rebuilding are key trade-offs.
-9. Use Cases: Bitcask is used in systems like Riak for storing small-to-moderate-sized key-value pairs.
-10. Design Principles: Simplicity, immutability, and log-structured organization ensure its reliability and speed.
+1. Core Idea: Bitcask uses append-only logs for writes, ensuring atomic and durable operations.
+2. Indexing: Keys are stored in memory in a BTreeMap, mapping to their positions in the logs for O(1) lookups.
+3. Data Layout: Storage consists of active file (for writes) and sealed immutable files.
+4. Reads: Lookups find key positions in memory, then read values directly from log files.
+5. Compaction: Manual compaction merges files to reclaim space and remove obsolete entries.
+6. Crash Recovery: Index rebuilds on startup by scanning logs, using timestamps for conflict resolution.
+7. Process Safety: File-based locking ensures single-writer, multiple-reader access.
+8. Data Integrity: CRC32 checksums verify data correctness.
+9. File Management: Automatic log rotation at 4MB with timestamp-based naming.
+10. Design Principles: Simplicity, durability, and efficient reads/writes.
 
 ## Paper
 
@@ -21,32 +21,21 @@ https://riak.com/assets/bitcask-intro.pdf
 
 This implementation provides:
 
-- A command-line interface (`bitask`) for interacting with the key-value store
-- A Rust library crate that can be used as a dependency in other projects
+- A Rust library crate for embedding in other projects
 - Core Bitcask features including:
-  - Append-only log files with automatic rotation (4MB per file)
-  - In-memory key directory
+  - Append-only log structure with automatic rotation (4MB per file)
+  - In-memory key directory using BTreeMap
   - Process-safe file locking
-  - Crash recovery
+  - Crash recovery through log replay
+  - Data integrity via CRC32 checksums
 - Only byte arrays (`Vec<u8>`) are supported for keys and values
 
-## Usage as a CLI
-
-```bash
-bitask ask --key my_key
-```
-
-```bash
-bitask put --key my_key --value my_value
-```
-
-## Usage as a library
+## Usage
 
 ```rust
 use bitask::db::Bitask;
-use std::path::Path;
 
-// Open database with exclusive access
+// Open database with exclusive write access
 let mut db = Bitask::open("./db")?;
 
 // Store a value
@@ -57,17 +46,34 @@ let value = db.ask(b"key")?;
 assert_eq!(value, b"value");
 
 // Remove a value
-db.remove(b"key")?;
+db.remove(b"key".to_vec())?;
 
-// Only one writer can exist at a time
+// Manual compaction
+db.compact()?;
+
+// Process safety demonstration
 let another_db = Bitask::open("./db");
 assert!(matches!(another_db.err().unwrap(), bitask::db::Error::WriterLock));
 ```
 
 ## Implementation Details
 
+### Log Files
+- Active file: `<timestamp>.active.log` - Current file being written to
+- Sealed files: `<timestamp>.log` - Immutable files after rotation
+- Lock file: `db.lock` - Ensures single-writer access
+
 ### Log Rotation
-- Active log files are automatically rotated when they reach 4MB
-- Each log file is named with a timestamp (e.g., `1234567890.log`)
-- Active file has `.active.log` extension
-- After rotation, the old file is renamed to `.log` and a new `.active.log` is created
+- Active log files rotate automatically at 4MB
+- Files are named with millisecond timestamps
+- After rotation, `.active.log` becomes `.log` and new `.active.log` is created
+
+### Durability Guarantees
+- Atomic single-key operations
+- Crash recovery through log replay
+- Data integrity verification via CRC32
+
+### Limitations
+- All keys must fit in memory
+- Single writer at a time
+- No multi-key transactions

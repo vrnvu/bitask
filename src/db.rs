@@ -2,6 +2,35 @@
 //!
 //! This crate provides a simple, efficient key-value store based on the Bitcask paper.
 //! It uses an append-only log structure with an in-memory index for fast lookups.
+//!
+//! # Features
+//!
+//! - Single-writer, multiple-reader architecture
+//! - Process-safe file locking
+//! - Automatic log file rotation
+//! - CRC32 checksums for data integrity
+//! - Efficient in-memory key directory
+//! - Crash recovery through log replay
+//!
+//! # Implementation Details
+//!
+//! The store consists of:
+//! - Active log file for current writes
+//! - Immutable sealed log files
+//! - In-memory key directory for O(1) lookups
+//! - File-based process locking
+//!
+//! # Durability Guarantees
+//!
+//! - Atomic single-key operations
+//! - Crash recovery through log replay
+//! - Data integrity verification via CRC32
+//!
+//! # Limitations
+//!
+//! - All keys must fit in memory
+//! - Single writer at a time
+//! - No multi-key transactions
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -12,11 +41,14 @@ use std::{
 
 use fs2::FileExt;
 
+/// Errors that can occur during database operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Invalid log file name encountered during operations
     #[error("Invalid log file name '{filename}'")]
     InvalidLogFileName { filename: String },
 
+    /// Failed to parse timestamp from file name or data
     #[error("Failed to parse timestamp '{value}'")]
     TimestampParse {
         value: String,
@@ -24,30 +56,39 @@ pub enum Error {
         source: std::num::ParseIntError,
     },
 
+    /// Underlying IO operation failed
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Attempted to open database for writing when another process has the write lock
     #[error("Only one writer allowed at a time")]
     WriterLock,
 
+    /// Key not found in database
     #[error("Key not found")]
     KeyNotFound,
 
+    /// Referenced file not found in database directory
     #[error("File {0} not found")]
     FileNotFound(String),
 
+    /// Attempted to store empty value
     #[error("Value size must be greater than 0")]
     InvalidEmptyValue,
 
+    /// Attempted to use empty key
     #[error("Key size must be greater than 0")]
     InvalidEmptyKey,
 
+    /// System time operation failed
     #[error("Timestamp error: {0}")]
     TimestampError(#[from] std::time::SystemTimeError),
 
+    /// Timestamp value overflow when converting to u64
     #[error("Timestamp overflow, converting to u64: {0}")]
     TimestampOverflow(#[from] std::num::TryFromIntError),
 
+    /// No active file found when opening existing database
     #[error("Active file not found in non empty path")]
     ActiveFileNotFound,
 }
@@ -69,6 +110,12 @@ pub const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// - Append-only log structure
 /// - In-memory key directory
 /// - Automatic log rotation at 4MB
+///
+/// # Thread Safety
+///
+/// The database ensures process-level safety through file locking, but is not
+/// thread-safe internally. Concurrent access from multiple threads requires
+/// appropriate synchronization mechanisms at the application level.
 ///
 /// # Examples
 ///
@@ -104,14 +151,17 @@ pub const MAX_ACTIVE_FILE_SIZE: u64 = 4 * 1024 * 1024;
 /// 3. All existing data remains accessible
 #[derive(Debug)]
 pub struct Bitask {
+    /// Base directory path where all database files are stored
     path: PathBuf,
+    /// File lock handle to ensure single-writer access
     _file_lock: File,
-
+    /// Timestamp identifier of the current active file
     writer_id: u64,
+    /// Buffered writer for the active log file
     writer: BufWriter<File>,
-
+    /// Map of file IDs to their respective buffered readers
     readers: HashMap<u64, BufReader<File>>,
-
+    /// In-memory index mapping keys to their latest value locations
     keydir: BTreeMap<Vec<u8>, KeyDirEntry>,
 }
 
@@ -138,12 +188,23 @@ impl Bitask {
     ///
     /// * `path` - Path where the database files will be stored
     ///
+    /// # Returns
+    ///
+    /// Returns a new `Bitask` instance if successful.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// * Another process has write access (`Error::WriterLock`)
     /// * Filesystem operations fail (`Error::Io`)
     /// * No active file is found when opening existing DB (`Error::ActiveFileNotFound`)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let mut db = bitask::db::Bitask::open("my_db")?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         fs::create_dir_all(&path)?;
         let lock_path = path.as_ref().join(FILE_LOCK_PATH);
@@ -182,6 +243,10 @@ impl Bitask {
     ///
     /// * `path` - Path where the database files will be stored
     /// * `lock_file` - The exclusive lock file for this database
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `Bitask` instance if successful.
     ///
     /// # Errors
     ///
@@ -226,6 +291,10 @@ impl Bitask {
     ///
     /// * `path` - Path where the database files are stored
     /// * `lock_file` - The exclusive lock file for this database
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Bitask` instance initialized with the existing database state.
     ///
     /// # Errors
     ///
@@ -306,6 +375,27 @@ impl Bitask {
         })
     }
 
+    /// Rebuilds the in-memory key directory from a log file.
+    ///
+    /// Scans through the given log file and reconstructs the key directory by:
+    /// - Reading each command header
+    /// - Processing key-value entries
+    /// - Updating the keydir with the latest value positions
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - Buffered reader for the log file
+    /// * `file_id` - Timestamp identifier of the log file
+    ///
+    /// # Returns
+    ///
+    /// Returns a BTreeMap containing the rebuilt key directory mapping keys to their latest positions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * IO operations fail while reading the file
+    /// * Log file contains invalid or corrupted data
     fn rebuild_keydir(
         reader: &mut BufReader<File>,
         file_id: u64,
@@ -363,6 +453,23 @@ impl Bitask {
         Ok(keydir)
     }
 
+    /// Rotates the active log file when it reaches the size limit.
+    ///
+    /// This process:
+    /// 1. Renames the current active file to a sealed log file
+    /// 2. Creates a new active file with current timestamp
+    /// 3. Updates internal writer and reader references
+    ///
+    /// # Returns
+    ///
+    /// Returns `()` if rotation was successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * File operations fail (`Error::Io`)
+    /// * System time operations fail (`Error::TimestampError`)
+    /// * IO operations fail (`Error::Io`)
     fn rotate_active_file(&mut self) -> Result<(), Error> {
         let timestamp = timestamp_as_u64()?;
 
@@ -394,9 +501,15 @@ impl Bitask {
 
     /// Retrieves the value associated with the given key.
     ///
+    /// Performs an O(1) lookup in the in-memory index followed by a single disk read.
+    ///
     /// # Parameters
     ///
     /// * `key` - The key to look up
+    ///
+    /// # Returns
+    ///
+    /// Returns the value as a byte vector if the key exists.
     ///
     /// # Errors
     ///
@@ -405,6 +518,16 @@ impl Bitask {
     /// * The key doesn't exist (`Error::KeyNotFound`)
     /// * The data file is missing (`Error::FileNotFound`)
     /// * IO operations fail (`Error::Io`)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let mut db = bitask::db::Bitask::open("my_db")?;
+    /// if let Ok(value) = db.ask(b"my_key") {
+    ///     println!("Found value: {:?}", value);
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn ask(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
@@ -438,10 +561,17 @@ impl Bitask {
     /// If the key already exists, it will be updated with the new value.
     /// The operation is atomic and durable (synced to disk).
     ///
+    /// Performance: Requires one disk write (append-only) and one in-memory index update.
+    /// May trigger file rotation if the active file exceeds size limit (4MB).
+    ///
     /// # Parameters
     ///
     /// * `key` - The key to store
     /// * `value` - The value to associate with the key
+    ///
+    /// # Returns
+    ///
+    /// Returns `()` if the operation was successful.
     ///
     /// # Errors
     ///
@@ -449,6 +579,14 @@ impl Bitask {
     /// * The key is empty (`Error::InvalidEmptyKey`)
     /// * The value is empty (`Error::InvalidEmptyValue`)
     /// * IO operations fail (`Error::Io`)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let mut db = bitask::db::Bitask::open("my_db")?;
+    /// db.put(b"my_key".to_vec(), b"my_value".to_vec())?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
@@ -511,15 +649,32 @@ impl Bitask {
 
     /// Removes a key-value pair from the database.
     ///
+    /// The operation is atomic and durable. Even if the key doesn't exist,
+    /// a tombstone entry is written to ensure the removal is persisted.
+    ///
+    /// Performance: Requires one disk write (append-only) and one in-memory index update.
+    ///
     /// # Parameters
     ///
     /// * `key` - The key to remove
+    ///
+    /// # Returns
+    ///
+    /// Returns `()` if the operation was successful.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// * The key is empty (`Error::InvalidEmptyKey`)
     /// * IO operations fail (`Error::Io`)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let mut db = bitask::db::Bitask::open("my_db")?;
+    /// db.remove(b"my_key".to_vec())?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn remove(&mut self, key: Vec<u8>) -> Result<(), Error> {
         if key.is_empty() {
             return Err(Error::InvalidEmptyKey);
@@ -543,11 +698,28 @@ impl Bitask {
     /// 2. Creates a new compacted file with only latest entries
     /// 3. Removes old files after successful compaction
     ///
+    /// Performance: Requires reading all immutable files and writing live entries
+    /// to a new file. Memory usage remains constant as entries are processed
+    /// sequentially.
+    ///
+    /// # Returns
+    ///
+    /// Returns `()` if compaction was successful.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// * IO operations fail (`Error::Io`)
     /// * File operations fail (`Error::FileNotFound`)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # let mut db = bitask::db::Bitask::open("my_db")?;
+    /// // After many operations, compact to reclaim space
+    /// db.compact()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn compact(&mut self) -> Result<(), Error> {
         // Create new file for compaction
         let timestamp = timestamp_as_u64()?;
@@ -622,14 +794,18 @@ impl CommandHeader {
         + std::mem::size_of::<u32>()
         + std::mem::size_of::<u32>();
 
-    /// Creates a new command header.
+    /// Creates a new command header with the specified metadata.
     ///
-    /// # Parameters
+    /// # Arguments
     ///
-    /// * `crc` - CRC32 checksum of the key and value
-    /// * `timestamp` - Current timestamp in milliseconds
+    /// * `crc` - CRC32 checksum of the key and value data
+    /// * `timestamp` - Timestamp when the command was created (milliseconds since UNIX epoch)
     /// * `key_len` - Length of the key in bytes
-    /// * `value_len` - Length of the value in bytes
+    /// * `value_len` - Length of the value in bytes (0 for remove commands)
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `CommandHeader` initialized with the provided values
     fn new(crc: u32, timestamp: u64, key_len: u32, value_len: u32) -> Self {
         Self {
             crc,
@@ -639,15 +815,21 @@ impl CommandHeader {
         }
     }
 
-    /// Serializes the header to a byte buffer.
+    /// Serializes the header into a byte buffer.
     ///
-    /// # Parameters
+    /// The header is written in little-endian byte order with the following layout:
+    /// - CRC32 (4 bytes)
+    /// - Timestamp (8 bytes)
+    /// - Key length (4 bytes)
+    /// - Value size (4 bytes)
     ///
-    /// * `buffer` - The buffer to write the header to
+    /// # Arguments
+    ///
+    /// * `buffer` - The vector to write the serialized header to
     ///
     /// # Errors
     ///
-    /// Returns an error if the write operations fail (`Error::Io`)
+    /// Returns `Error::Io` if writing to the buffer fails
     fn serialize(&self, buffer: &mut Vec<u8>) -> Result<(), Error> {
         buffer.write_all(&self.crc.to_le_bytes())?;
         buffer.write_all(&self.timestamp.to_le_bytes())?;
@@ -658,15 +840,19 @@ impl CommandHeader {
 
     /// Deserializes a header from a byte buffer.
     ///
-    /// # Parameters
+    /// # Arguments
     ///
-    /// * `buf` - The buffer containing the header data
+    /// * `buf` - Buffer containing the serialized header data (must be at least `SIZE` bytes)
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// * The buffer is too small (`Error::Io`)
-    /// * The buffer contains invalid data
+    /// Returns `Error::Io` if:
+    /// * The buffer is smaller than `SIZE` bytes
+    /// * The buffer contains invalid data that can't be converted to header fields
+    ///
+    /// # Panics
+    ///
+    /// Will not panic as buffer size is checked before conversion
     fn deserialize(buf: &[u8]) -> Result<Self, Error> {
         if buf.len() < Self::SIZE {
             return Err(Error::Io(std::io::Error::new(
@@ -687,24 +873,33 @@ impl CommandHeader {
 /// A command to append a key-value pair to the log.
 #[derive(Debug)]
 struct CommandSet {
+    /// CRC32 checksum of key and value
     crc: u32,
+    /// Timestamp when command was created (milliseconds since UNIX epoch)
     timestamp: u64,
+    /// Key to be stored
     key: Vec<u8>,
+    /// Value to be associated with the key
     value: Vec<u8>,
 }
 
 /// A command to remove a key from the database.
 #[derive(Debug)]
 struct CommandRemove {
+    /// CRC32 checksum of key
     crc: u32,
+    /// Timestamp when command was created (milliseconds since UNIX epoch)
     timestamp: u64,
+    /// Key to be removed
     key: Vec<u8>,
 }
 
 impl CommandSet {
     /// Creates a new set command.
     ///
-    /// # Parameters
+    /// Generates a CRC32 checksum of the key-value pair and includes current timestamp.
+    ///
+    /// # Arguments
     ///
     /// * `key` - The key to store
     /// * `value` - The value to associate with the key
@@ -732,7 +927,12 @@ impl CommandSet {
 
     /// Serializes the command into a byte array.
     ///
-    /// # Parameters
+    /// Format:
+    /// 1. Command header (CRC, timestamp, key length, value length)
+    /// 2. Key bytes
+    /// 3. Value bytes
+    ///
+    /// # Arguments
     ///
     /// * `buffer` - The buffer to write the serialized command to
     ///
@@ -756,7 +956,9 @@ impl CommandSet {
 impl CommandRemove {
     /// Creates a new remove command.
     ///
-    /// # Parameters
+    /// Generates a CRC32 checksum of the key and includes current timestamp.
+    ///
+    /// # Arguments
     ///
     /// * `key` - The key to remove
     ///
@@ -781,7 +983,11 @@ impl CommandRemove {
 
     /// Serializes the command into a byte array.
     ///
-    /// # Parameters
+    /// Format:
+    /// 1. Command header (CRC, timestamp, key length, value length = 0)
+    /// 2. Key bytes
+    ///
+    /// # Arguments
     ///
     /// * `buffer` - The buffer to write the serialized command to
     ///
@@ -797,33 +1003,39 @@ impl CommandRemove {
 
 /// Constructs the path for an active log file.
 ///
-/// # Parameters
+/// # Arguments
 ///
 /// * `path` - Base directory path
 /// * `timestamp` - Timestamp used as file identifier
 ///
 /// # Returns
 ///
-/// Returns a `PathBuf` containing the full path to the active log file
+/// Returns a `PathBuf` containing the full path to the active log file in format:
+/// `<path>/<timestamp>.active.log`
 fn file_active_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.active.log", timestamp))
 }
 
-/// Constructs the path for a regular log file.
+/// Constructs the path for a regular (sealed) log file.
 ///
-/// # Parameters
+/// # Arguments
 ///
 /// * `path` - Base directory path
 /// * `timestamp` - Timestamp used as file identifier
 ///
 /// # Returns
 ///
-/// Returns a `PathBuf` containing the full path to the log file
+/// Returns a `PathBuf` containing the full path to the log file in format:
+/// `<path>/<timestamp>.log`
 fn file_log_path(path: impl AsRef<Path>, timestamp: u64) -> PathBuf {
     path.as_ref().join(format!("{}.log", timestamp))
 }
 
 /// Gets current timestamp as milliseconds since UNIX epoch.
+///
+/// # Returns
+///
+/// Returns the current time in milliseconds since UNIX epoch as a u64
 ///
 /// # Errors
 ///
@@ -840,6 +1052,10 @@ fn timestamp_as_u64() -> Result<u64, Error> {
 }
 
 impl Drop for Bitask {
+    /// Cleans up resources when the database is dropped.
+    ///
+    /// Removes the physical lock file from the filesystem to allow
+    /// future database instances to acquire the write lock.
     fn drop(&mut self) {
         // Remove the physical lock file from the filesystem
         if let Ok(path) = self.path.join("db.lock").canonicalize() {
